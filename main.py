@@ -21,7 +21,7 @@ def run_flask():
     app.run(host='0.0.0.0', port=port)
 
 # --- Cấu hình Bot (Lấy từ biến môi trường để bảo mật) ---
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE") # THAY THẾ BẰNG TOKEN THẬT CỦA BẠN HOẶC ĐẶT BIẾN MÔI TRƯỜNG
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "7630248769:AAG36CSLxWWovAfa-Byjh_DohcpN3pA94Iw") # THAY THẾ BẰNG TOKEN THẬT CỦA BẠN HOẶC ĐẶT BIẾN MÔI TRƯỜNG
 ADMIN_IDS_STR = os.environ.get("ADMIN_IDS", "6915752059,6285177749") # THAY THẾ BẰNG ID ADMIN THẬT CỦA BẠN
 ADMIN_IDS = [int(id) for id in ADMIN_IDS_STR.split(',') if id.strip()]
 

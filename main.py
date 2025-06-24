@@ -1,7 +1,7 @@
 import requests
 import time
 import logging
-import os
+# import os # Không cần thiết nếu bạn nhúng token và ID trực tiếp vào code
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -21,24 +21,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ======================= CẤU HÌNH BOT & API =======================
-# Lấy BOT_TOKEN từ biến môi trường
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    logger.error("BOT_TOKEN chưa được thiết lập trong biến môi trường!")
-    exit(1) # Thoát nếu không có token
+# NHÚNG TRỰC TIẾP BOT_TOKEN VÀO ĐÂY
+BOT_TOKEN = "7658240012:AAFAZSC7ONQ1KRGNtskAUr-Pepuv4n7KjvE" # THAY THẾ BẰNG TOKEN THẬT CỦA BẠN!
 
 API_URL = "https://wanglinapiws.up.railway.app/api/taixiu"
 
-# Lấy ADMIN_IDS từ biến môi trường và chuyển đổi thành danh sách số nguyên
-ADMIN_IDS_STR = os.getenv("ADMIN_IDS")
-if ADMIN_IDS_STR:
-    try:
-        ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_STR.split(',') if x.strip()]
-    except ValueError:
-        logger.error("ADMIN_IDS trong biến môi trường không phải là các số nguyên hợp lệ!")
-        ADMIN_IDS = [] # Gán rỗng nếu có lỗi
-else:
-    ADMIN_IDS = [] # Mặc định là danh sách rỗng nếu không có biến môi trường
+# NHÚNG TRỰC TIẾP ADMIN_IDS VÀO ĐÂY
+# Bạn có thể có nhiều ID, cách nhau bởi dấu phẩy trong danh sách.
+ADMIN_IDS = [6915752059, 6285177749] # THAY THẾ BẰNG ID ADMIN THẬT CỦA BẠN!
+
 
 # Trạng thái bot và dữ liệu tạm thời (lưu ý: sẽ bị mất khi bot khởi động lại)
 USER_STATES = {}  # {user_id: {"bot_running": False, "game_selected": None}}
@@ -463,6 +454,11 @@ async def xoaadmin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if len(context.args) == 1:
         try:
             admin_id_to_remove = int(context.args[0])
+            # Đảm bảo không xóa chính admin đang thực hiện lệnh
+            if admin_id_to_remove == update.effective_user.id:
+                await update.message.reply_text("Bạn không thể tự xóa quyền admin của chính mình! 😬")
+                return
+
             if admin_id_to_remove in ADMIN_IDS:
                 ADMIN_IDS.remove(admin_id_to_remove)
                 await update.message.reply_text(f"ID `{admin_id_to_remove}` đã được xóa khỏi danh sách admin. 🗑️", parse_mode="Markdown")

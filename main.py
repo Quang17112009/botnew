@@ -1,7 +1,6 @@
 import requests
 import time
 import logging
-# import os # Không cần thiết nếu bạn nhúng token và ID trực tiếp vào code
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -21,14 +20,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ======================= CẤU HÌNH BOT & API =======================
-# NHÚNG TRỰC TIẾP BOT_TOKEN VÀO ĐÂY
-BOT_TOKEN = "7658240012:AAFAZSC7ONQ1KRGNtskAUr-Pepuv4n7KjvE" # THAY THẾ BẰNG TOKEN THẬT CỦA BẠN!
+# THAY THẾ BẰNG TOKEN THẬT CỦA BẠN!
+BOT_TOKEN = "7658240012:AAFAZSC7ONQ1KRGNtskAUr-Pepuv4n7KjvE" 
 
 API_URL = "https://wanglinapiws.up.railway.app/api/taixiu"
 
-# NHÚNG TRỰC TIẾP ADMIN_IDS VÀO ĐÂY
-# Bạn có thể có nhiều ID, cách nhau bởi dấu phẩy trong danh sách.
-ADMIN_IDS = [6915752059, 6285177749] # THAY THẾ BẰNG ID ADMIN THẬT CỦA BẠN!
+# THAY THẾ BẰNG ID ADMIN THẬT CỦA BẠN! Bạn có thể có nhiều ID trong danh sách.
+ADMIN_IDS = [6915752059, 6285177749] 
 
 
 # Trạng thái bot và dữ liệu tạm thời (lưu ý: sẽ bị mất khi bot khởi động lại)

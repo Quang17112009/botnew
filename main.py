@@ -20,7 +20,7 @@ CODES_FILE = 'codes.json' # Đổi tên từ 'cau_patterns.json' cho phù hợp 
 
 # New API Endpoints
 API_LUCKYWIN = "https://apiluck.onrender.com/api/taixiu"
-API_SUNWIN = "https://apisun-m90j.onrender.com/api/taixiu/wanglin"
+API_SUNWIN = "https://apisun-hsby.onrender.com/api/taixiu/wanglin"
 
 # --- Khởi tạo Flask App và Telegram Bot ---
 app = Flask(__name__)

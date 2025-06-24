@@ -12,7 +12,80 @@ from threading import Thread, Event, Lock
 from flask import Flask, request
 app = Flask(__name__)
 
+@app.route('/')
+def home():
+    return "Bot is running!"
 
+def run_flask():
+    port = int(os.environ.get("PORT", 5000))
+    # Sử dụng debug=False và host='0.0.0.0' cho môi trường production
+    app.run(host='0.0.0.0', port=port, debug=False)
+
+# --- Cấu hình Bot (Token và Admin ID được nhúng trực tiếp) ---
+# CẢNH BÁO QUAN TRỌNG:
+# Việc nhúng TOKEN và ADMIN_IDS trực tiếp vào code như thế này KHÔNG ĐƯỢC KHUYẾN KHÍCH
+# cho môi trường Production vì lý do bảo mật (làm lộ thông tin nhạy cảm trong mã nguồn).
+# Tốt nhất vẫn nên sử dụng biến môi trường (Environment Variables) trên Render.
+# Tuy nhiên, để đáp ứng yêu cầu của bạn và khắc phục lỗi, tôi sẽ để trực tiếp ở đây.
+BOT_TOKEN = "8167401761:AAGL9yN2YwzmmjgC7fbgkBYwzmmjgC7fbgkBYTIE3_V7w" # Token bot của bạn
+ADMIN_IDS = [6285177749, 6915752059] # Các ID admin của bạn
+
+API_URL = "https://wanglinapiws.up.railway.app/api/taixiu"
+
+# --- Constants ---
+GAME_SUNWIN = "Sunwin"
+GAME_88VIN = "88vin" # Placeholder for future game
+
+# ======================= DANH SÁCH CẦU ĐẸP & CẦU XẤU =======================
+# Cầu đẹp: Tổng từ 9 đến 12 và không phải bộ 3 (không trùng)
+# Danh sách này được giữ nguyên theo yêu cầu của bạn.
+cau_dep = {
+    (1, 2, 6), (1, 4, 4), (1, 5, 3), (1, 6, 2),
+    (2, 1, 6), (2, 2, 5), (2, 3, 4), (2, 4, 3), (2, 5, 2),
+    (3, 1, 5), (3, 2, 4), (3, 3, 3), (3, 4, 2), (3, 5, 1),
+    (4, 1, 4), (4, 2, 3), (4, 3, 2), (4, 4, 1),
+    (5, 1, 4), (5, 3, 1),
+    (6, 1, 2), (6, 2, 1),(3,4,1),(6,4,5),(1,6,3),(2,6,4),(6,1,4),(1,3,2),(2,4,5),(1,3,4),(1,5,1),(3,6,6),(3,6,4),(5,4,6),(3,1,6),(1,3,6),(2,2,4),(1,5,3),(2,4,5),(2,1,2),(6,1,4),(4,6,6),(4,3,5),(3,2,5),(3,4,2),(1,6,4),(6,4,4),(2,3,1),(1,2,1),(6,2,5),(3,1,3),(5,5,1),(4,5,4),(4,6,1),(3,6,1)
+}
+
+# Các mẫu còn lại là cầu xấu (tổng <9 hoặc >12 hoặc là bộ 3)
+# Danh sách này được giữ nguyên theo yêu cầu của bạn.
+cau_xau = {
+    (1, 1, 1), (1, 1, 2), (1, 1, 3), (1, 1, 4), (1, 1, 5), (1, 1, 6),
+    (1, 2, 2), (1, 2, 3), (1, 2, 4), (1, 2, 5),
+    (1, 3, 1), (1, 3, 3),
+    (1, 4, 1), (1, 4, 2), (1, 4, 3),
+     (1, 5, 2),
+    (1, 6, 1), (1, 6, 6),
+    (2, 1, 1), (2, 1, 3), (2, 1, 4), (2, 1, 5),
+    (2, 2, 1), (2, 2, 2), (2, 2, 3),
+     (2, 3, 2), (2, 3, 3),
+    (2, 4, 1), (2, 4, 2),
+    (2, 5, 1), (2, 5, 6),
+    (2, 6, 5), (2, 6, 6),
+    (3, 1, 1), (3, 1, 2), (3, 1, 4),
+    (3, 2, 1), (3, 2, 2), (3, 2, 3),
+    (3, 3, 1), (3, 3, 2), (3, 3, 3), (3, 4, 6),
+    (3, 5, 5), (3, 5, 6),
+    (3, 6, 5),
+    (4, 1, 2), (4, 1, 3),
+    (4, 2, 1), (4, 2, 2),
+    (4, 3, 1), (4, 3, 6),
+    (4, 4, 4), (4, 4, 5), (4, 4, 6),
+    (4, 5, 5), (4, 5, 6),
+    (4, 6, 3), (4, 6, 4), (4, 6, 5),
+    (5, 1, 1), (5, 1, 2),
+    (5, 2, 1), (5, 2, 6),
+    (5, 3, 6),
+    (5, 4, 5),
+    (5, 5, 5), (5, 5, 6),
+    (5, 6, 4), (5, 6, 5), (5, 6, 6),
+    (6, 1, 1),
+    (6, 2, 6),
+    (6, 3, 6),
+    (6, 5, 6),
+    (6, 6, 1), (6, 6, 2), (6, 6, 3), (6, 6, 4), (6, 6, 5), (6, 6, 6),(5,1,3),(2,6,1),(6,4,6),(5,2,2),(2,1,2),(4,4,1),(1,2,1),(1,3,5)
+}
 
 # --- Biến toàn cục và Lock để đảm bảo an toàn Thread ---
 bot = telebot.TeleBot(BOT_TOKEN)

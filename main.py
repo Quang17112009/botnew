@@ -11,12 +11,12 @@ from threading import Thread, Event, Lock
 
 from flask import Flask, request
 
-# --- Cấu hình Bot (ĐẶT TRỰC TIẾP TẠI ĐÂY) ---
+# --- Cấu hình Bot (ĐẶT TRỰC TIẾP TẠY ĐÂY) ---
 BOT_TOKEN = "8167401761:AAGL9yN2YwzmmjgC7fbgkBYhTI7DhE3_V7w"
 ADMIN_IDS = [6915752059, 6285177749] # Thêm ID admin mới vào đây
 
 DATA_FILE = 'user_data.json'
-CODES_FILE = 'codes.json' # Đổi tên từ 'cau_patterns.json' cho phù hợp với 'key' mới
+CODES_FILE = 'codes.json' 
 
 # Chỉ có một API cho Sunwin
 API_SUNWIN = "https://wanglinapiws.up.railway.app/api/taixiu"
@@ -38,21 +38,22 @@ GENERATED_KEYS = {} # {key: {"value": 1, "type": "day", "used_by": null, "used_t
 LAST_PREDICTION_ID = None # Lưu ID phiên cuối cùng cho Sunwin
 GAME_HISTORY = [] # Lưu lịch sử 10 phiên gần nhất cho Sunwin
 
-# ======================= DANH SÁCH CẦU ĐẸP & CẦU XẤU (Tích hợp từ code của bạn) =======================
+# ======================= DANH SÁCH CẦU ĐẸP & CẦU XẤU (Thuật toán của bạn) =======================
 # Cầu đẹp: Tổng từ 9 đến 12 và không phải bộ 3 (không trùng)
 cau_dep = {
-    (1, 2, 6), (1, 4, 4), (1, 5, 3), (1, 6, 2),
-    (2, 1, 6), (2, 2, 5), (2, 3, 4), (2, 4, 3), (2, 5, 2),
-    (3, 1, 5), (3, 2, 4), (3, 3, 3), (3, 4, 2), (3, 5, 1),
+    (1, 4, 4), (1, 6, 2),
+    (2, 2, 5), (2, 3, 4), (2, 4, 3), (2, 5, 2),
+    (3, 1, 5), (3, 2, 4), (3, 4, 2), (3, 5, 1),
     (4, 1, 4), (4, 2, 3), (4, 3, 2), (4, 4, 1),
     (5, 1, 4), (5, 3, 1),
     (6, 1, 2), (6, 2, 1),
 
     (1, 1, 7), (1, 2, 6), (1, 3, 5), (1, 4, 4), (1, 5, 3), (1, 6, 2),
     (2, 1, 6), (2, 2, 5), (2, 3, 4), (2, 4, 3), (2, 5, 2), (2, 6, 1),
-    (3, 1, 5), (3, 2, 4), (3, 3, 3), (3, 4, 2), (3, 5, 1),
+    (3, 1, 5), (3, 2, 4), (3, 4, 2), (3, 5, 1),
     (4, 1, 4), (4, 2, 3), (4, 3, 2), (4, 4, 1), (5, 2, 2), (5, 3, 1),
-    (6, 1, 2), (6, 2, 1),(3,4,1),(6,4,5),(1,6,3),(2,6,4),(6,1,4),(1,3,2),(2,4,5),(1,3,4),(1,5,1),(3,6,6),(3,6,4),(5,4,6),(3,1,6),(1,3,6),(2,2,4),(1,5,3),(2,4,5),(2,1,2),(6,1,4),(4,6,6),(4,3,5),(3,2,5),(3,4,2),(1,6,4),(6,4,4),(2,3,1),(1,2,1),(6,2,5),(3,1,3),(5,5,1),(4,5,4),(4,6,1),(3,6,1)
+    (6, 1, 2), (6, 2, 1),(3,4,1),(6,4,5),(1,6,3),(2,6,4),(6,1,4),(1,3,2),(2,4,5),(1,3,4),(1,5,1),(3,6,6),(3,6,4),(5,4,6),(3,1,6),(1,3,6),(2,2,4),(1,5,3),(2,4,5),(2,1,2),(6,1,4),(4,6,6),(4,3,5),(3,2,5),(3,4,2),(1,6,4),(6,4,4),(2,3,1),(1,2,1),(6,2,5),(3,1,3),(5,5,1),(4,5,4),(4,6,1),(3,6,1),(5,6,6),(2,4,4),(3,6,6),
+    (5,5,3),(1,6,5),(5,5,3),(1,6,6),(4,1,2),(3,3,2),(2,2,6),(1,4,6),(4,3,4),(1,4,1),(5,1,5),(4,4,6),(5,4,5),(3,6,5),(5,6,3),(6,5,4),(4,3,6),(6,1,1),(5,6,1),(5,6,5),(2,2,1),(4,5,3),
 }
 
 # Các mẫu còn lại là cầu xấu (tổng <9 hoặc >12 hoặc là bộ 3)
@@ -61,38 +62,69 @@ cau_xau = {
     (1, 1, 1), (1, 1, 2), (1, 1, 3), (1, 1, 4), (1, 1, 5), (1, 1, 6),
     (1, 2, 2), (1, 2, 3), (1, 2, 4), (1, 2, 5),
     (1, 3, 1), (1, 3, 3),
-    (1, 4, 1), (1, 4, 2), (1, 4, 3),
+    (1, 4, 2), (1, 4, 3),
      (1, 5, 2),
-    (1, 6, 1), (1, 6, 6),
+    (1, 6, 1),
     (2, 1, 1), (2, 1, 3), (2, 1, 4), (2, 1, 5),
-    (2, 2, 1), (2, 2, 2), (2, 2, 3),
+    (2, 2, 2), (2, 2, 3),
      (2, 3, 2), (2, 3, 3),
     (2, 4, 1), (2, 4, 2),
     (2, 5, 1), (2, 5, 6),
     (2, 6, 5), (2, 6, 6),
     (3, 1, 1), (3, 1, 2), (3, 1, 4),
     (3, 2, 1), (3, 2, 2), (3, 2, 3),
-    (3, 3, 1), (3, 3, 2), (3, 3, 3), (3, 4, 6),
+    (3, 3, 1), (3, 3, 3), (3, 4, 6),
     (3, 5, 5), (3, 5, 6),
-    (3, 6, 5),
-    (4, 1, 2), (4, 1, 3),
+    (4, 1, 3),
     (4, 2, 1), (4, 2, 2),
-    (4, 3, 1), (4, 3, 6),
-    (4, 4, 4), (4, 4, 5), (4, 4, 6),
+    (4, 3, 1),
+    (4, 4, 4), (4, 4, 5),
     (4, 5, 5), (4, 5, 6),
     (4, 6, 3), (4, 6, 4), (4, 6, 5),
     (5, 1, 1), (5, 1, 2),
     (5, 2, 1), (5, 2, 6),
     (5, 3, 6),
-    (5, 4, 5),
     (5, 5, 5), (5, 5, 6),
-    (5, 6, 4), (5, 6, 5), (5, 6, 6),
-    (6, 1, 1),
+    (5, 6, 4),
     (6, 2, 6),
     (6, 3, 6),
     (6, 5, 6),
-    (6, 6, 1), (6, 6, 2), (6, 6, 3), (6, 6, 4), (6, 6, 5), (6, 6, 6),(5,1,3),(2,6,1),(6,4,6),(5,2,2),(2,1,2),(4,4,1),(1,2,1),(1,3,5)
+    (6, 6, 1), (6, 6, 2), (6, 6, 3), (6, 6, 4), (6, 6, 5), (6, 6, 6),(5,1,3),(2,6,1),(6,4,6),(5,2,2),(2,1,2),(4,4,1),(1,2,1),(1,3,5),(1,5,3),(3,3,3),(1,2,6),(2,1,6)
 }
+
+# ======================= HÀM XỬ LÝ DỰ ĐOÁN (Thuật toán của bạn) =======================
+def du_doan_theo_xi_ngau(dice):
+    d1, d2, d3 = dice
+    total = d1 + d2 + d3
+    result_list = []
+
+    for d in [d1, d2, d3]:
+        tmp = d + total
+        # Logic này được giữ nguyên từ thuật toán của bạn
+        if tmp in [4, 5]:
+            tmp -= 4
+        elif tmp >= 6:
+            tmp -= 6
+        result_list.append("Tài" if tmp % 2 == 0 else "Xỉu")
+
+    tai_count = result_list.count("Tài")
+    prediction = "Tài" if tai_count >= 2 else "Xỉu"
+
+    # Phân loại cầu theo danh sách đã liệt kê
+    if dice in cau_dep:
+        loai_cau = "Cầu đẹp"
+    else:
+        loai_cau = "Cầu xấu"
+        # Đảo ngược dự đoán nếu là cầu xấu
+        prediction = "Xỉu" if prediction == "Tài" else "Tài"
+
+    return {
+        "xuc_xac": dice,
+        "tong": total,
+        "cau": loai_cau,
+        "du_doan": prediction,
+        "chi_tiet": result_list
+    }
 
 # --- Quản lý dữ liệu người dùng, key và lịch sử ---
 user_data = {}
@@ -160,40 +192,7 @@ def user_expiry_date(user_id):
         return user_data[str(user_id)]['expiry_date']
     return "Không có"
 
-# ======================= HÀM XỬ LÝ DỰ ĐOÁN (Tích hợp từ code của bạn) =======================
-def du_doan_theo_xi_ngau(dice):
-    d1, d2, d3 = dice
-    total = d1 + d2 + d3
-    result_list = []
-
-    for d in [d1, d2, d3]:
-        tmp = d + total
-        if tmp in [4, 5]: # Điều kiện này có vẻ hơi lạ, thường thì modulo 6 hoặc logic khác
-            tmp -= 4
-        elif tmp >= 6:
-            tmp -= 6
-        result_list.append("Tài" if tmp % 2 == 0 else "Xỉu")
-
-    tai_count = result_list.count("Tài")
-    prediction = "Tài" if tai_count >= 2 else "Xỉu"
-
-    # Phân loại cầu theo danh sách đã liệt kê
-    if dice in cau_dep:
-        loai_cau = "Cầu đẹp"
-    else:
-        loai_cau = "Cầu xấu"
-        # Đảo ngược dự đoán nếu là cầu xấu
-        prediction = "Xỉu" if prediction == "Tài" else "Tài"
-
-    return {
-        "xuc_xac": dice,
-        "tong": total,
-        "cau": loai_cau,
-        "du_doan": prediction,
-        "chi_tiet": result_list
-    }
-
-# --- Lấy dữ liệu từ API ---
+# --- Lấy dữ liệu từ API Sunwin ---
 def lay_du_lieu_sunwin():
     try:
         response = requests.get(API_SUNWIN)
@@ -238,7 +237,8 @@ def prediction_loop(stop_event: Event):
                 if issue_id != LAST_PREDICTION_ID:
                     # Tính toán dự đoán bằng thuật toán của bạn
                     prediction_result = du_doan_theo_xi_ngau(dice)
-                    ket_qua_tx = "Tài" if prediction_result['tong'] > 10 else "Xỉu" # Xác định Tài/Xỉu từ tổng
+                    # Xác định Tài/Xỉu từ tổng để hiển thị kết quả phiên hiện tại
+                    ket_qua_tx = "Tài" if prediction_result['tong'] > 10 else "Xỉu" 
                     tong_diem = prediction_result['tong']
                     du_doan_ket_qua = prediction_result['du_doan']
 
@@ -288,10 +288,6 @@ def prediction_loop(stop_event: Event):
 
                     LAST_PREDICTION_ID = issue_id
                     save_user_data(user_data) # Lưu lại trạng thái user nếu có thay đổi (ví dụ user bị block)
-                # else:
-                    # print(f"Phiên {issue_id} chưa có dữ liệu mới.")
-            # else:
-                # print("Dữ liệu Sunwin không hợp lệ (thiếu Phien hoặc xúc xắc không phải số nguyên).")
         time.sleep(5) # Đợi 5 giây trước khi kiểm tra phiên mới
     print("Prediction loop stopped.")
 
@@ -758,4 +754,3 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     print(f"Starting Flask app locally on port {port}")
     app.run(host='0.0.0.0', port=port, debug=True)
-

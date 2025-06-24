@@ -18,12 +18,14 @@ def home():
 
 def run_flask():
     port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+    # Sử dụng debug=False và host='0.0.0.0' cho môi trường production
+    app.run(host='0.0.0.0', port=port, debug=False)
 
-# --- Cấu hình Bot (Lấy từ biến môi trường để bảo mật) ---
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8167401761:AAGL9yN2YwzmmjgC7fbgkBYhTI7DhE3_V7w") # THAY THẾ BẰNG TOKEN THẬT CỦA BẠN HOẶC ĐẶT BIẾN MÔI TRƯỜNG
-ADMIN_IDS_STR = os.environ.get("ADMIN_IDS", "6915752059,6285177749") # THAY THẾ BẰNG ID ADMIN THẬT CỦA BẠN
-ADMIN_IDS = [int(id) for id in ADMIN_IDS_STR.split(',') if id.strip()]
+# --- Cấu hình Bot (Token và Admin ID được nhúng trực tiếp) ---
+# CẢNH BÁO: Việc nhúng TOKEN và ADMIN_IDS trực tiếp vào code không được khuyến khích
+# cho môi trường Production vì lý do bảo mật. Tốt nhất vẫn nên sử dụng biến môi trường.
+BOT_TOKEN = "8167401761:AAGL9yN2YwzmmjgC7fbgkBYhTI7DhE3_V7w" 
+ADMIN_IDS = [6285177749, 6915752059] # Các ID admin của bạn
 
 API_URL = "https://wanglinapiws.up.railway.app/api/taixiu"
 
@@ -156,7 +158,12 @@ def load_data():
                 active_keys[k] = v
             
             user_preferences = data.get("user_preferences", {})
-            admin_users = set(data.get("admin_users", ADMIN_IDS))
+            
+            # Ensure default ADMIN_IDS are always added if starting fresh or if admin_users is empty
+            # Initial admins are now fixed in code, so this part needs adjustment if you want to allow dynamic initial admins from ENV
+            # For simplicity with direct code embedding, we'll ensure the fixed ADMIN_IDS are always present
+            admin_users_loaded = set(data.get("admin_users", []))
+            admin_users = admin_users_loaded.union(set(ADMIN_IDS)) # Ensure hardcoded ADMIN_IDS are always there
             
             # Ensure existing users from preferences also have an entry in user_states if missing
             for user_id_str in user_preferences.keys():
@@ -166,25 +173,28 @@ def load_data():
                 # Clean up expired keys for active users
                 if user_preferences[user_id_str].get("key_active"):
                     found_active_key = False
+                    keys_to_remove_for_user = []
                     for key_name, key_info in active_keys.items():
                         if key_info.get("user_id") == user_id:
                             if key_info.get("expiry") and key_info["expiry"] < datetime.now():
                                 print(f"Key {key_name} for user {user_id} expired. Deactivating user.")
                                 user_preferences[user_id_str]["key_active"] = False
                                 user_preferences[user_id_str]["notify"] = False
-                                del active_keys[key_name] # Remove expired key
-                                break
+                                keys_to_remove_for_user.append(key_name)
+                                break # Only one key per user for now, assuming
                             found_active_key = True
                             break
-                    if not found_active_key: # User was active but no active key found
-                        print(f"User {user_id} was active but no corresponding active key found. Deactivating.")
+                    for key_name in keys_to_remove_for_user:
+                        if key_name in active_keys:
+                            del active_keys[key_name]
+                    if not found_active_key and user_preferences[user_id_str]["key_active"]: # User was active but no non-expired active key found
+                        print(f"User {user_id} was active but no corresponding non-expired active key found. Deactivating.")
                         user_preferences[user_id_str]["key_active"] = False
                         user_preferences[user_id_str]["notify"] = False
 
     except (FileNotFoundError, json.JSONDecodeError):
         print("No existing data found or data corrupted. Starting fresh.")
-        # Ensure default ADMIN_IDS are included if starting fresh
-        admin_users.update(ADMIN_IDS)
+        admin_users = set(ADMIN_IDS) # Use hardcoded ADMIN_IDS if starting fresh
         save_data() # Save initial state if no file or corrupted
 
 # ======================= HÀM XỬ LÝ DỰ ĐOÁN =======================
@@ -249,6 +259,7 @@ def prediction_worker():
         )
 
         if not (current_session and all(isinstance(x, int) for x in dice)):
+            print(f"Dữ liệu API không hợp lệ: Phiên={current_session}, Xúc xắc={dice}")
             time.sleep(2)
             continue
 
@@ -271,13 +282,16 @@ def prediction_worker():
                         user_preferences[str(user_id_associated)]["key_active"] = False
                         user_preferences[str(user_id_associated)]["notify"] = False
                         try:
+                            # Use chat_id in send_message, not user_id_associated directly
                             bot.send_message(user_id_associated, f"🔑 Key của bạn đã hết hạn. Vui lòng liên hệ admin để gia hạn hoặc mua key mới.", parse_mode='Markdown')
                         except telebot.apihelper.ApiException as e:
                             print(f"Could not send expiry message to {user_id_associated}: {e}")
                     keys_to_delete.append(key_name)
             
             for key_name in keys_to_delete:
-                del active_keys[key_name]
+                print(f"Deleting expired key: {key_name}")
+                if key_name in active_keys: # Double check before deleting
+                    del active_keys[key_name]
             
             # Now send notifications to active users
             for user_id_str, prefs in list(user_preferences.items()):
@@ -287,7 +301,7 @@ def prediction_worker():
                     if prefs.get("last_session_id") != current_session:
                         message = (
                             f"🎮 **KẾT QUẢ PHIÊN HIỆN TẠI Sunwin** 🎮\n"
-                            f"Phiên: `{current_session}` | Kết quả: `{'Tài' if ket_qua['tong'] > 10 else 'Xỉu'}` (Tổng: `{ket_qua['tong']}`)\n\n"
+                            f"Phiên: `{current_session}` | Xúc xắc: `{dice}` | Kết quả: `{'Tài' if ket_qua['tong'] > 10 else 'Xỉu'}` (Tổng: `{ket_qua['tong']}`)\n\n" 
                             f"**Dự đoán cho phiên tiếp theo:**\n"
                             f"🔢 Phiên: `{current_session + 1}`\n"
                             f"🤖 Dự đoán: `{prediction_for_next_session}`\n"
@@ -302,7 +316,14 @@ def prediction_worker():
                             if "bot was blocked by the user" in str(e) or "chat not found" in str(e):
                                 print(f"Removing {user_id} from notifications as bot was blocked.")
                                 prefs["notify"] = False
+                                prefs["key_active"] = False # Also deactivate key if user blocked
                                 user_preferences[user_id_str] = prefs # Persist the change
+                                # Remove associated key
+                                for key_name, key_info in active_keys.items():
+                                    if key_info.get("user_id") == user_id:
+                                        del active_keys[key_name]
+                                        print(f"Deleted key {key_name} for blocked user {user_id}")
+                                        break
                             elif "Too Many Requests" in str(e):
                                 print(f"Rate limited for user {user_id}. Will retry later.")
                                 pass # Don't update last_session_id so it gets retried
@@ -327,18 +348,22 @@ def send_welcome(message):
     if is_active:
         key_expired = True
         with data_lock:
+            key_name_to_delete = None
             for key_name, key_info in active_keys.items():
                 if key_info.get("user_id") == user_id:
                     if key_info.get("expiry") and key_info["expiry"] < datetime.now():
                         print(f"Key {key_name} for user {user_id} expired during /start check.")
                         user_preferences[str(user_id)]["key_active"] = False
                         user_preferences[str(user_id)]["notify"] = False
-                        del active_keys[key_name]
+                        key_name_to_delete = key_name
                         is_active = False # Mark as inactive
                         break
                     else:
                         key_expired = False
                         break
+            if key_name_to_delete and key_name_to_delete in active_keys:
+                del active_keys[key_name_to_delete]
+
             if key_expired and user_preferences[str(user_id)]["key_active"]: # If key_active was true but no non-expired key found
                 user_preferences[str(user_id)]["key_active"] = False
                 user_preferences[str(user_id)]["notify"] = False
@@ -406,7 +431,9 @@ def handle_key(message):
                 else:
                     key_info["expiry"] = datetime.max # Effectively never expires if limit_seconds is not set
 
-                user_preferences[str(chat_id)] = {"key_active": True, "game": None, "notify": False, "last_session_id": None}
+                # Ensure user_preferences entry exists for new key activation
+                user_preferences.setdefault(str(chat_id), {"key_active": False, "game": None, "notify": False, "last_session_id": None})
+                user_preferences[str(chat_id)]["key_active"] = True
                 user_states[chat_id] = {"awaiting_key": False}
                 bot.reply_to(message, f"🥳 Key `{key}` đã được kích hoạt thành công! Bạn có thể bắt đầu sử dụng bot.", parse_mode='Markdown')
                 save_data()
@@ -452,21 +479,14 @@ def show_history(message):
         bot.reply_to(message, "Bạn chưa chọn game nào để xem lịch sử. Vui lòng chạy `/chaybot` để chọn game trước.", parse_mode='Markdown')
         return
 
-    bot.reply_to(message, f"Đang lấy lịch sử 10 phiên gần nhất cho game `{selected_game}`...", parse_mode='Markdown')
+    bot.reply_to(message, f"Đang lấy dữ liệu phiên gần nhất cho game `{selected_game}`...", parse_mode='Markdown')
 
     try:
-        # Assuming API_URL can handle /history for general history or /taixiu/history for specific
-        # Based on your prompt, the primary API is for taixiu, so we'll just show the latest from that.
-        # If the API provided a separate /history endpoint for all games, it would be different.
-        response = requests.get(API_URL, timeout=5) # Re-using the main API for latest data
+        # Re-using the main API for latest data
+        response = requests.get(API_URL, timeout=5) 
         response.raise_for_status()
         current_data = response.json()
 
-        # To get proper history, you'd ideally need an API endpoint like:
-        # requests.get(f"{API_URL}/history?limit=10")
-        # For now, we'll simulate by fetching the latest and assuming it's part of a historical sequence
-        # THIS PART NEEDS A PROPER API HISTORY ENDPOINT TO WORK AS INTENDED
-        
         history_messages = []
         if current_data:
             session = current_data.get("Phien")
@@ -474,15 +494,22 @@ def show_history(message):
             if all(isinstance(d, int) for d in dice):
                 total = sum(dice)
                 result_type = "Tài" if total > 10 else "Xỉu"
-                history_messages.append(f"Phiên: `{session}` | Xúc xắc: `{dice}` | Tổng: `{total}` | Kết quả: `{result_type}`")
+                
+                # Predict for this session to show in history for completeness
+                ket_qua_phien_hien_tai = du_doan_theo_xi_ngau(dice)
+                
+                history_messages.append(
+                    f"Phiên: `{session}` | Xúc xắc: `{dice}` | Tổng: `{total}` | Kết quả: `{result_type}`\n"
+                    f"🤖 Dự đoán cho phiên tiếp theo: `{ket_qua_phien_hien_tai['du_doan']}` (Cầu: {ket_qua_phien_hien_tai['cau']})"
+                )
             else:
-                history_messages.append(f"Phiên: `{session}` | Dữ liệu không đầy đủ.")
+                history_messages.append(f"Phiên: `{session}` | Dữ liệu không đầy đủ hoặc không hợp lệ.")
         
         if history_messages:
-            bot.send_message(chat_id, "**Lịch sử 1 phiên gần nhất (chỉ lấy được 1 phiên từ API hiện tại):**\n" + "\n".join(history_messages), parse_mode='Markdown')
-            bot.send_message(chat_id, "⚠️ **Lưu ý:** Để có lịch sử đầy đủ 10 phiên, API cần hỗ trợ endpoint lịch sử chuyên biệt.")
+            bot.send_message(chat_id, "**KẾT QUẢ PHIÊN GẦN NHẤT:**\n" + "\n".join(history_messages), parse_mode='Markdown')
+            bot.send_message(chat_id, "⚠️ **Lưu ý:** API hiện tại chỉ cung cấp dữ liệu phiên gần nhất, không phải lịch sử nhiều phiên.")
         else:
-            bot.send_message(chat_id, "Không có dữ liệu lịch sử.")
+            bot.send_message(chat_id, "Không có dữ liệu phiên gần nhất từ API.")
 
     except requests.exceptions.RequestException as e:
         bot.send_message(chat_id, f"❌ Lỗi khi lấy dữ liệu từ API: {e}")
@@ -550,7 +577,7 @@ def list_keys(message):
         key_list_messages = ["**DANH SÁCH KEY HIỆN CÓ:**"]
         current_time = datetime.now()
         
-        for key, info in active_keys.items():
+        for key, info in list(active_keys.items()): # Iterate over a copy in case of deletion
             status = "Chưa kích hoạt"
             expiry_info = ""
             
@@ -562,15 +589,30 @@ def list_keys(message):
                 if info.get("expiry"):
                     if info['expiry'] == datetime.max:
                         expiry_info = " (Vĩnh viễn)"
-                    elif info['expiry'] > current_time:
-                        expiry_info = f" (Hết hạn: `{info['expiry'].strftime('%Y-%m-%d %H:%M:%S')}`)"
-                    else:
+                    elif info['expiry'] < current_time:
                         expiry_info = " (Đã hết hạn)"
+                        # Clean up expired key if found during list
+                        user_id_associated = info.get("user_id")
+                        if user_id_associated and str(user_id_associated) in user_preferences:
+                            user_preferences[str(user_id_associated)]["key_active"] = False
+                            user_preferences[str(user_id_associated)]["notify"] = False
+                            try:
+                                bot.send_message(user_id_associated, f"🔑 Key của bạn đã hết hạn. Vui lòng liên hệ admin để gia hạn hoặc mua key mới.", parse_mode='Markdown')
+                            except telebot.apihelper.ApiException as e:
+                                print(f"Could not send expiry message during list_keys to {user_id_associated}: {e}")
+                        del active_keys[key] # Remove the expired key
+                        save_data() # Save the change
+                        continue # Skip to next key as this one is deleted
+                    else:
+                        expiry_info = f" (Hết hạn: `{info['expiry'].strftime('%Y-%m-%d %H:%M:%S')}`)"
                 status += expiry_info
             
             key_list_messages.append(f"- `{key}`: {status}")
 
-        bot.reply_to(message, "\n".join(key_list_messages), parse_mode='Markdown')
+        if not key_list_messages:
+            bot.reply_to(message, "Hiện không có key nào còn hiệu lực hoặc đã được kích hoạt.")
+        else:
+            bot.reply_to(message, "\n".join(key_list_messages), parse_mode='Markdown')
 
 @bot.message_handler(commands=['xoakey'])
 def delete_key(message):
@@ -719,33 +761,57 @@ def broadcast_message(message):
 @bot.callback_query_handler(func=lambda call: call.data.startswith('select_game_'))
 def callback_game_selection(call):
     chat_id = call.message.chat.id
+
+    # Check if the message was edited previously and has been answered.
+    # This can happen if a user clicks multiple times very quickly.
+    try:
+        # Try to answer the callback query first
+        bot.answer_callback_query(call.id, text=f"Đã chọn game {call.data.split('_')[2]}")
+    except telebot.apihelper.ApiException as e:
+        if "query is too old and response timeout" in str(e) or "message is not modified" in str(e):
+            print(f"Callback query already answered or too old for chat {chat_id}: {e}")
+            return # Exit if already handled or too old
+        else:
+            raise # Re-raise other unexpected API exceptions
+
     game = call.data.split('_')[2]
 
     with data_lock:
         if str(chat_id) in user_preferences and user_preferences[str(chat_id)].get("key_active"):
             user_preferences[str(chat_id)]["game"] = game
             user_preferences[str(chat_id)]["notify"] = True
-            bot.edit_message_text(
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                text=f"Tuyệt vời! Bạn đã chọn game **{game}**. Bot sẽ bắt đầu gửi thông báo dự đoán cho game này.",
-                parse_mode='Markdown'
-            )
+            
+            # Use try-except for edit_message_text as well
+            try:
+                bot.edit_message_text(
+                    chat_id=call.message.chat.id,
+                    message_id=call.message.message_id,
+                    text=f"Tuyệt vời! Bạn đã chọn game **{game}**. Bot sẽ bắt đầu gửi thông báo dự đoán cho game này.",
+                    parse_mode='Markdown'
+                )
+            except telebot.apihelper.ApiException as e:
+                print(f"Error editing message for chat {chat_id}: {e}")
+                # If message is not found or already modified, send a new message
+                bot.send_message(chat_id, f"Tuyệt vời! Bạn đã chọn game **{game}**. Bot sẽ bắt đầu gửi thông báo dự đoán cho game này.", parse_mode='Markdown')
+
             save_data()
-            bot.answer_callback_query(call.id, text=f"Đã chọn game {game}")
         else:
-            bot.edit_message_text(
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                text="Có lỗi xảy ra hoặc key của bạn không còn hoạt động. Vui lòng thử lại lệnh `/chaybot` hoặc kích hoạt key.",
-                parse_mode='Markdown'
-            )
-            bot.answer_callback_query(call.id, text="Lỗi kích hoạt hoặc key không hợp lệ.")
+            try:
+                bot.edit_message_text(
+                    chat_id=call.message.chat.id,
+                    message_id=call.message.message_id,
+                    text="Có lỗi xảy ra hoặc key của bạn không còn hoạt động. Vui lòng thử lại lệnh `/chaybot` hoặc kích hoạt key.",
+                    parse_mode='Markdown'
+                )
+            except telebot.apihelper.ApiException as e:
+                print(f"Error editing message for invalid key user {chat_id}: {e}")
+                bot.send_message(chat_id, "Có lỗi xảy ra hoặc key của bạn không còn hoạt động. Vui lòng thử lại lệnh `/chaybot` hoặc kích hoạt key.", parse_mode='Markdown')
 
 
 # --- Main execution ---
 if __name__ == "__main__":
-    load_data()
+    load_data() # Load data first
+
     print("Starting Flask server for keep-alive...")
     flask_thread = Thread(target=run_flask)
     flask_thread.daemon = True # Allow main program to exit even if this thread is running
@@ -757,15 +823,25 @@ if __name__ == "__main__":
     prediction_thread.start()
 
     print("Starting Telegram bot polling...")
-    try:
-        # Increase polling interval slightly to be less aggressive, could help with stability
-        bot.polling(none_stop=True, interval=1) 
-    except Exception as e:
-        print(f"Bot polling stopped due to an error: {e}")
-    finally:
-        stop_event.set() # Signal prediction thread to stop
-        print("Bot stopped. Waiting for threads to finish...")
-        if prediction_thread.is_alive():
-            prediction_thread.join(timeout=5) # Give it some time to finish
-        print("Threads terminated.")
-
+    while True: # Loop indefinitely to auto-restart polling on errors
+        try:
+            bot.polling(none_stop=True, interval=1, timeout=20) # Thêm timeout
+        except requests.exceptions.ConnectionError as e:
+            print(f"❌ Mất kết nối với Telegram API: {e}. Đang thử lại sau 5 giây...")
+            time.sleep(5)
+        except telebot.apihelper.ApiException as e:
+            if "Forbidden: bot was blocked by the user" in str(e):
+                print(f"Bot bị người dùng chặn: {e}. Sẽ tiếp tục polling cho các user khác.")
+                # No need to stop, polling will continue for other chats
+            elif "Bad Gateway" in str(e) or "Gateway Timeout" in str(e):
+                print(f"Telegram API lỗi Gateway: {e}. Đang thử lại sau 5 giây...")
+                time.sleep(5)
+            else:
+                print(f"❌ Lỗi Telegram API không xác định: {e}. Đang thử lại sau 5 giây...")
+                time.sleep(5)
+        except Exception as e:
+            print(f"❌ Lỗi không mong muốn trong polling: {e}. Đang thử lại sau 10 giây...")
+            time.sleep(10)
+        
+        # Thêm một chút delay giữa các lần polling lại để tránh spam
+        time.sleep(1) 

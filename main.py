@@ -10,7 +10,8 @@ from threading import Thread, Event, Lock
 
 # --- Flask for Keep Alive ---
 from flask import Flask, request
-app = Flask(__lọc ra thủ công
+app = Flask(__name__)
+
 
 
 # --- Biến toàn cục và Lock để đảm bảo an toàn Thread ---

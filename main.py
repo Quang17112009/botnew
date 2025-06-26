@@ -39,57 +39,42 @@ LAST_PREDICTION_ID = None # Lưu ID phiên cuối cùng cho Sunwin
 GAME_HISTORY = [] # Lưu lịch sử 10 phiên gần nhất cho Sunwin
 
 # ======================= DANH SÁCH CẦU ĐẸP & CẦU XẤU (Thuật toán của bạn) =======================
-# Cầu đẹp: Tổng từ 9 đến 12 và không phải bộ 3 (không trùng)
+# Danh sách cầu đẹp và cầu xấu
 cau_dep = {
-    (1, 4, 4), (1, 6, 2),
-    (2, 2, 5), (2, 3, 4), (2, 4, 3), (2, 5, 2),
-    (3, 1, 5), (3, 2, 4), (3, 4, 2), (3, 5, 1),
-    (4, 1, 4), (4, 2, 3), (4, 3, 2), (4, 4, 1),
-    (5, 1, 4), (5, 3, 1),
-    (6, 1, 2), (6, 2, 1),
-
-    (1, 1, 7), (1, 2, 6), (1, 3, 5), (1, 4, 4), (1, 5, 3), (1, 6, 2),
+    (1, 4, 4), (1, 6, 2), (2, 2, 5), (2, 4, 3), (2, 5, 2),
+    (3, 1, 5), (3, 2, 4), (3, 4, 2), (3, 5, 1), (4, 1, 4), (4, 2, 3),
+    (4, 3, 2), (4, 4, 1), (5, 1, 4), (5, 3, 1), (6, 2, 1),
+    (1, 1, 7), (1, 2, 6), (1, 3, 5), (1, 4, 4), (1, 6, 2),
     (2, 1, 6), (2, 2, 5), (2, 3, 4), (2, 4, 3), (2, 5, 2), (2, 6, 1),
-    (3, 1, 5), (3, 2, 4), (3, 4, 2), (3, 5, 1),
-    (4, 1, 4), (4, 2, 3), (4, 3, 2), (4, 4, 1), (5, 2, 2), (5, 3, 1),
-    (6, 1, 2), (6, 2, 1),(3,4,1),(6,4,5),(1,6,3),(2,6,4),(6,1,4),(1,3,2),(2,4,5),(1,3,4),(1,5,1),(3,6,6),(3,6,4),(5,4,6),(3,1,6),(1,3,6),(2,2,4),(1,5,3),(2,4,5),(2,1,2),(6,1,4),(4,6,6),(4,3,5),(3,2,5),(3,4,2),(1,6,4),(6,4,4),(2,3,1),(1,2,1),(6,2,5),(3,1,3),(5,5,1),(4,5,4),(4,6,1),(3,6,1),(5,6,6),(2,4,4),(3,6,6),
-    (5,5,3),(1,6,5),(5,5,3),(1,6,6),(4,1,2),(3,3,2),(2,2,6),(1,4,6),(4,3,4),(1,4,1),(5,1,5),(4,4,6),(5,4,5),(3,6,5),(5,6,3),(6,5,4),(4,3,6),(6,1,1),(5,6,1),(5,6,5),(2,2,1),(4,5,3),
+    (3, 2, 4), (3, 4, 2), (3, 5, 1), (4, 1, 4), (4, 2, 3), (4, 3, 2), (4, 4, 1),
+    (5, 3, 1), (6, 1, 2), (6, 2, 1), (3, 4, 1), (6, 4, 5), (1, 6, 3), (2, 6, 4),
+    (6, 1, 4), (1, 3, 2), (2, 4, 5), (1, 3, 4), (1, 5, 1), (3, 6, 6), (3, 6, 4), (5, 4, 6),
+    (3, 1, 6), (1, 3, 6), (2, 2, 4), (2, 4, 5), (2, 1, 2), (6, 1, 4), (4, 6, 6),
+    (4, 3, 5), (3, 2, 5), (3, 4, 2), (6, 4, 4), (2, 3, 1), (1, 2, 1), (6, 2, 5),
+    (3, 1, 3), (5, 5, 1), (4, 5, 4), (4, 6, 1), (3, 6, 1), (5, 6, 6), (2, 4, 4),
+    (1, 6, 5), (5, 5, 3), (1, 6, 6), (4, 1, 2), (3, 3, 2), (1, 4, 6), (4, 3, 4),
+    (1, 4, 1), (5, 1, 5), (4, 4, 6), (5, 4, 5), (3, 6, 5), (5, 6, 3), (6, 5, 4), (4, 3, 6),
+    (6, 1, 1), (5, 6, 1), (5, 6, 5), (2, 2, 1), (4, 5, 3), (3, 5, 6), (1, 5, 4), (1, 1, 4),
+    (2, 1, 3), (2, 4, 1), (2, 6, 6), (5, 6, 1), (3, 4, 3),(3, 3, 4),
+    (4, 6, 4), (5, 1, 6),(4, 2, 1),(1,2,4) # ✅ Thêm mẫu này vào cầu đẹp
 }
 
-# Các mẫu còn lại là cầu xấu (tổng <9 hoặc >12 hoặc là bộ 3)
-# Đã lọc ra thủ công
 cau_xau = {
-    (1, 1, 1), (1, 1, 2), (1, 1, 3), (1, 1, 4), (1, 1, 5), (1, 1, 6),
-    (1, 2, 2), (1, 2, 3), (1, 2, 4), (1, 2, 5),
-    (1, 3, 1), (1, 3, 3),
-    (1, 4, 2), (1, 4, 3),
-     (1, 5, 2),
-    (1, 6, 1),
-    (2, 1, 1), (2, 1, 3), (2, 1, 4), (2, 1, 5),
-    (2, 2, 2), (2, 2, 3),
-     (2, 3, 2), (2, 3, 3),
-    (2, 4, 1), (2, 4, 2),
-    (2, 5, 1), (2, 5, 6),
-    (2, 6, 5), (2, 6, 6),
-    (3, 1, 1), (3, 1, 2), (3, 1, 4),
-    (3, 2, 1), (3, 2, 2), (3, 2, 3),
-    (3, 3, 1), (3, 3, 3), (3, 4, 6),
-    (3, 5, 5), (3, 5, 6),
-    (4, 1, 3),
-    (4, 2, 1), (4, 2, 2),
-    (4, 3, 1),
-    (4, 4, 4), (4, 4, 5),
-    (4, 5, 5), (4, 5, 6),
-    (4, 6, 3), (4, 6, 4), (4, 6, 5),
-    (5, 1, 1), (5, 1, 2),
-    (5, 2, 1), (5, 2, 6),
-    (5, 3, 6),
-    (5, 5, 5), (5, 5, 6),
-    (5, 6, 4),
-    (6, 2, 6),
-    (6, 3, 6),
-    (6, 5, 6),
-    (6, 6, 1), (6, 6, 2), (6, 6, 3), (6, 6, 4), (6, 6, 5), (6, 6, 6),(5,1,3),(2,6,1),(6,4,6),(5,2,2),(2,1,2),(4,4,1),(1,2,1),(1,3,5),(1,5,3),(3,3,3),(1,2,6),(2,1,6)
+    (1, 1, 1), (1, 1, 2), (1, 1, 3), (1, 1, 5), (1, 1, 6),
+    (1, 2, 2), (1, 2, 3), (1, 2, 5), (1, 3, 1), (1, 3, 3),
+    (1, 4, 2), (1, 4, 3), (1, 5, 2), (1, 6, 1),
+    (2, 1, 1), (2, 1, 4), (2, 1, 5), (2, 2, 2), (2, 2, 3), (2, 3, 2),
+    (2, 3, 3), (2, 4, 2), (2, 5, 1), (2, 5, 6), (2, 6, 5),
+    (3, 1, 1), (3, 1, 2), (3, 1, 4), (3, 2, 1), (3, 2, 2), (3, 2, 3),
+    (3, 3, 1), (3, 3, 3), (3, 4, 6), (3, 5, 5),
+    (4, 1, 3), (4, 3, 1), (4, 4, 4), (4, 4, 5),
+    (4, 5, 5), (4, 5, 6), (4, 6, 3), (4, 6, 4), (4, 6, 5),
+    (5, 1, 1), (5, 1, 2), (5, 2, 1), (5, 2, 6), (5, 3, 6),
+    (5, 5, 5), (5, 5, 6), (5, 6, 4), (5, 4, 1),
+    (6, 2, 6), (6, 3, 6), (6, 5, 6), (6, 6, 1),(6, 6, 2),
+    (6, 6, 3), (6, 6, 4), (6, 6, 5), (6, 6, 6),
+    (5, 1, 3), (2, 6, 1), (6, 4, 6), (5, 2, 2), (2, 1, 2), (4, 4, 1), (1, 2, 1), (1, 3, 5),
+    (1, 5, 3), (3, 3, 3), (1, 2, 6), (2, 1, 6), (2, 3, 4), (5, 5, 3), (6, 1, 2), (6, 3, 3),(6,5,3),(4,2,2),(1,6,4),(2, 2, 6)
 }
 
 # ======================= HÀM XỬ LÝ DỰ ĐOÁN (Thuật toán của bạn) =======================
@@ -100,7 +85,6 @@ def du_doan_theo_xi_ngau(dice):
 
     for d in [d1, d2, d3]:
         tmp = d + total
-        # Logic này được giữ nguyên từ thuật toán của bạn
         if tmp in [4, 5]:
             tmp -= 4
         elif tmp >= 6:
@@ -113,10 +97,12 @@ def du_doan_theo_xi_ngau(dice):
     # Phân loại cầu theo danh sách đã liệt kê
     if dice in cau_dep:
         loai_cau = "Cầu đẹp"
-    else:
+    elif dice in cau_xau:
         loai_cau = "Cầu xấu"
         # Đảo ngược dự đoán nếu là cầu xấu
         prediction = "Xỉu" if prediction == "Tài" else "Tài"
+    else:
+        loai_cau = "Không xác định" # Giữ nguyên dự đoán nếu không thuộc cả hai
 
     return {
         "xuc_xac": dice,
@@ -237,9 +223,15 @@ def prediction_loop(stop_event: Event):
                 if issue_id != LAST_PREDICTION_ID:
                     # Tính toán dự đoán bằng thuật toán của bạn
                     prediction_result = du_doan_theo_xi_ngau(dice)
-                    # Xác định Tài/Xỉu từ tổng để hiển thị kết quả phiên hiện tại
-                    ket_qua_tx = "Tài" if prediction_result['tong'] > 10 else "Xỉu" 
-                    tong_diem = prediction_result['tong']
+                    
+                    # Xác định Tài/Xỉu thực tế từ tổng của phiên hiện tại
+                    actual_total = prediction_result['tong']
+                    # Bộ ba luôn được coi là Xỉu trong Tài Xỉu truyền thống
+                    if dice[0] == dice[1] == dice[2]:
+                        ket_qua_tx = "Xỉu"
+                    else:
+                        ket_qua_tx = "Tài" if actual_total >= 11 else "Xỉu"
+                    
                     du_doan_ket_qua = prediction_result['du_doan']
 
                     # Cập nhật lịch sử game cho lệnh /lichsu
@@ -248,7 +240,7 @@ def prediction_loop(stop_event: Event):
                     GAME_HISTORY.append({
                         "Ma_phien": issue_id,
                         "Ket_qua": ket_qua_tx,
-                        "Tong_diem": tong_diem,
+                        "Tong_diem": actual_total,
                         "Du_doan_tiep": du_doan_ket_qua,
                         "Thoi_gian": datetime.now().strftime('%H:%M:%S')
                     })
@@ -264,7 +256,7 @@ def prediction_loop(stop_event: Event):
                             try:
                                 prediction_message = (
                                     f"🎮 **KẾT QUẢ PHIÊN HIỆN TẠI [SUNWIN]** 🎮\n"
-                                    f"Phiên: `{issue_id}` | Kết quả: **{ket_qua_tx}** (Tổng: **{tong_diem}**)\n\n"
+                                    f"Phiên: `{issue_id}` | Kết quả: **{ket_qua_tx}** (Tổng: **{actual_total}**)\n\n"
                                     f"**Dự đoán cho phiên tiếp theo:**\n"
                                     f"🔢 Phiên: `{str(int(issue_id) + 1).zfill(len(issue_id))}`\n"
                                     f"🤖 Dự đoán: **{du_doan_ket_qua}**\n"
@@ -273,14 +265,16 @@ def prediction_loop(stop_event: Event):
                                 bot.send_message(user_id, prediction_message, parse_mode='Markdown')
                             except telebot.apihelper.ApiTelegramException as e:
                                 if "bot was blocked by the user" in str(e) or "user is deactivated" in str(e):
-                                    print(f"Người dùng {user_id} đã chặn bot hoặc bị vô hiệu hóa.")
+                                    print(f"Người dùng {user_id} đã chặn bot hoặc bị vô hiệu hóa. Xóa user khỏi danh sách.")
+                                    # Optionally remove the user if they've blocked the bot
+                                    del user_data[user_id_str] 
                                 else:
                                     print(f"Lỗi gửi tin nhắn cho user {user_id}: {e}")
                             except Exception as e:
                                 print(f"Lỗi không xác định khi gửi tin nhắn cho user {user_id}: {e}")
 
                     print("-" * 50)
-                    print(f"🎮 Kết quả phiên hiện tại [SUNWIN]: {ket_qua_tx} (Tổng: {tong_diem})")
+                    print(f"🎮 Kết quả phiên hiện tại [SUNWIN]: {ket_qua_tx} (Tổng: {actual_total})")
                     print(f"🔢 Phiên: {issue_id} → {str(int(issue_id) + 1).zfill(len(issue_id))}")
                     print(f"🤖 Dự đoán: {du_doan_ket_qua}")
                     print(f"⚠️ Hãy đặt cược sớm trước khi phiên kết thúc!")
@@ -338,6 +332,8 @@ def show_help(message):
             "- `/xoaadmin <id>`: Xóa ID người dùng khỏi admin\n"
             "- `/danhsachadmin`: Xem danh sách các ID admin\n"
             "- `/broadcast [tin nhắn]`: Gửi thông báo đến tất cả người dùng\n"
+            "- `/tatbot_main [lý do]`: Tắt bot dự đoán chính (ảnh hưởng tất cả user)\n"
+            "- `/mokbot_main`: Mở lại bot dự đoán chính\n"
         )
     help_text += "\n══════════════════════════\n"
     help_text += "👥 Liên hệ admin để được hỗ trợ thêm."
@@ -488,12 +484,15 @@ def generate_key_command(message):
         for _ in range(quantity):
             # If quantity > 1, generate random keys, ignore the provided key_name
             # If quantity == 1, use the provided key_name if it's unique
-            if quantity > 1 or key_name in GENERATED_KEYS:
+            if quantity > 1 or key_name in GENERATED_KEYS: # Only generate new key if quantity > 1 or if provided key_name already exists
                 new_key = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
                 while new_key in GENERATED_KEYS: # Ensure uniqueness
                      new_key = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
             else:
-                new_key = key_name
+                new_key = key_name # Use the provided key_name for single key creation if not exists
+
+            if new_key in GENERATED_KEYS: # Double check if it exists after generation
+                continue # Skip if already exists, or handle as error for single key
 
             GENERATED_KEYS[new_key] = {
                 "value": value,
@@ -504,7 +503,7 @@ def generate_key_command(message):
             generated_keys_list.append(new_key)
 
         save_keys()
-        response_text = f"✅ Đã tạo thành công {quantity} mã key gia hạn **{value} {unit}**:\n\n"
+        response_text = f"✅ Đã tạo thành công {len(generated_keys_list)} mã key gia hạn **{value} {unit}**:\n\n"
         response_text += "\n".join([f"`{key}`" for key in generated_keys_list])
         response_text += "\n\n_(Các key này chưa được sử dụng)_"
         bot.reply_to(message, response_text, parse_mode='Markdown')
@@ -681,7 +680,7 @@ def send_broadcast(message):
 
 
 # Các lệnh tatbot/mokbot của bot chung, không phải cho từng user
-@bot.message_handler(commands=['tatbot'])
+@bot.message_handler(commands=['tatbot_main'])
 def disable_main_bot_predictions(message):
     global bot_enabled, bot_disable_reason, bot_disable_admin_id
     if not is_admin(message.chat.id):
@@ -690,7 +689,7 @@ def disable_main_bot_predictions(message):
 
     reason = telebot.util.extract_arguments(message.text)
     if not reason:
-        bot.reply_to(message, "Vui lòng nhập lý do tắt bot chính. Ví dụ: `/tatbot Bot đang bảo trì.`", parse_mode='Markdown')
+        bot.reply_to(message, "Vui lòng nhập lý do tắt bot chính. Ví dụ: `/tatbot_main Bot đang bảo trì.`", parse_mode='Markdown')
         return
 
     bot_enabled = False
@@ -698,7 +697,7 @@ def disable_main_bot_predictions(message):
     bot_disable_admin_id = message.chat.id
     bot.reply_to(message, f"✅ Bot dự đoán chính đã được tắt bởi Admin `{message.from_user.username or message.from_user.first_name}`.\nLý do: `{reason}`", parse_mode='Markdown')
 
-@bot.message_handler(commands=['mokbot'])
+@bot.message_handler(commands=['mokbot_main'])
 def enable_main_bot_predictions(message):
     global bot_enabled, bot_disable_reason, bot_disable_admin_id
     if not is_admin(message.chat.id):

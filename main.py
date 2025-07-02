@@ -20,7 +20,8 @@ PREDICTION_STATS_FILE = 'prediction_stats.json' # File mới để lưu thống 
 
 # --- Khởi tạo Flask App và Telegram Bot ---
 app = Flask(__name__)
-bot = telebot.TeleBot(BOT_TOKEN)
+# Quan trọng: threaded=False khi dùng webhook với Flask để Flask quản lý luồng
+bot = telebot.TeleBot(BOT_TOKEN, threaded=False) 
 
 # Global flags và objects
 bot_enabled = True
@@ -171,7 +172,7 @@ def prediction_loop(stop_event: Event):
             ket_qua_hien_tai_raw = api_data.get("matches")[0].upper() if api_data.get("matches") else "?"
             if ket_qua_hien_tai_raw == "T":
                 ket_qua_text = "TÀI"
-            elif ket_qua_hien_tai_raw == "X":
+            elif ket_qua_hien_ai_raw == "X":
                 ket_qua_text = "XỈU"
             else:
                 ket_qua_text = "Không rõ"
@@ -291,8 +292,10 @@ def use_code(message):
     # Apply extension
     current_expiry_str = user_data.get(user_id, {}).get('expiry_date')
     
-    if code_info['type'] == 'vĩnh viễn':
+    if code_info['type'] == 'vĩnh_viễn':
         new_expiry_date_str = "Vĩnh viễn"
+        value_display = "" # Không hiển thị giá trị cho vĩnh viễn
+        unit_display = "vĩnh viễn"
     else:
         if current_expiry_str and current_expiry_str != "Vĩnh viễn":
             current_expiry_date = datetime.strptime(current_expiry_str, '%Y-%m-%d %H:%M:%S')
@@ -305,15 +308,19 @@ def use_code(message):
             new_expiry_date = datetime.now() # Start from now if no previous expiry or if it was "Vĩnh viễn" but now changing to timed
 
         value = code_info['value']
-        if code_info['type'] == 'phút':
+        unit = code_info['type']
+        value_display = value
+        unit_display = unit
+
+        if unit == 'phút':
             new_expiry_date += timedelta(minutes=value)
-        elif code_info['type'] == 'giờ':
+        elif unit == 'giờ':
             new_expiry_date += timedelta(hours=value)
-        elif code_info['type'] == 'ngày':
+        elif unit == 'ngày':
             new_expiry_date += timedelta(days=value)
-        elif code_info['type'] == 'tuần':
+        elif unit == 'tuần':
             new_expiry_date += timedelta(weeks=value)
-        elif code_info['type'] == 'tháng':
+        elif unit == 'tháng':
             new_expiry_date += timedelta(days=value*30) # Ước tính 1 tháng = 30 ngày
         
         new_expiry_date_str = new_expiry_date.strftime('%Y-%m-%d %H:%M:%S')
@@ -328,7 +335,7 @@ def use_code(message):
     save_codes()
 
     bot.reply_to(message, 
-                 f"🎉 Bạn đã đổi mã code thành công! Gói của bạn đã được gia hạn thêm **{value} {code_info['type']}**.\n"
+                 f"🎉 Bạn đã đổi mã code thành công! Gói của bạn đã được gia hạn thêm **{value_display} {unit_display}**.\n"
                  f"Ngày hết hạn mới: `{user_data[user_id]['expiry_date']}`", 
                  parse_mode='Markdown')
 
@@ -372,7 +379,7 @@ def admin_menu(message):
         "🔹 `/mokbot`: Mở lại hoạt động dự đoán của bot.\n"
         "🔹 `/taokey <giá trị> <phút/giờ/ngày/tuần/tháng/vĩnh_viễn> <số lượng>`: Tạo mã key. VD: `/taokey 1 ngày 5`, `/taokey 1 vĩnh_viễn 1`.\n"
         "🔹 `/check`: Kiểm tra thống kê dự đoán của bot.\n"
-        "🔹 `/thongke` : Thống kê số lượng người dùng và code đã dùng."
+        "🔹 `/thongke` : Thống kê số lượng người dùng và key đã dùng."
     )
     bot.reply_to(message, admin_help_text, parse_mode='Markdown')
 
@@ -412,13 +419,14 @@ def extend_subscription(message):
         return
     
     args = telebot.util.extract_arguments(message.text).split()
-    if len(args) < 2 or len(args) > 3:
+    # /giahan <id> <value> <unit> hoặc /giahan <id> vĩnh_viễn
+    if not (len(args) == 3 and args[1].isdigit() and args[2].lower() in ['phút', 'giờ', 'ngày', 'tuần', 'tháng']) and \
+       not (len(args) == 2 and args[1].lower() == 'vĩnh_viễn' and args[0].isdigit()):
         bot.reply_to(message, "Cú pháp sai. Ví dụ: `/giahan <id_nguoi_dung> <số_lượng> <phút/giờ/ngày/tuần/tháng>` hoặc `/giahan <id_nguoi_dung> vĩnh_viễn`.\n"
                               "Ví dụ: `/giahan 12345 1 ngày` hoặc `/giahan 67890 vĩnh_viễn`", parse_mode='Markdown')
         return
     
     target_user_id_str = args[0]
-    unit_or_value = args[1].lower()
 
     if target_user_id_str not in user_data:
         user_data[target_user_id_str] = {
@@ -428,15 +436,11 @@ def extend_subscription(message):
         }
         bot.send_message(message.chat.id, f"Đã tạo tài khoản mới cho user ID `{target_user_id_str}`.")
 
-    if unit_or_value == 'vĩnh_viễn':
+    if args[1].lower() == 'vĩnh_viễn':
         new_expiry_date_str = "Vĩnh viễn"
         value_display = ""
         unit_display = "vĩnh viễn"
     else:
-        if not args[1].isdigit() or not (len(args) == 3 and args[2].lower() in ['phút', 'giờ', 'ngày', 'tuần', 'tháng']):
-            bot.reply_to(message, "Cú pháp sai. Ví dụ: `/giahan <id_nguoi_dung> <số_lượng> <phút/giờ/ngày/tuần/tháng>` hoặc `/giahan <id_nguoi_dung> vĩnh_viễn`.", parse_mode='Markdown')
-            return
-
         value = int(args[1])
         unit = args[2].lower()
         value_display = value
@@ -450,7 +454,7 @@ def extend_subscription(message):
             else:
                 new_expiry_date = current_expiry_date
         else:
-            new_expiry_date = datetime.now()
+            new_expiry_date = datetime.now() # Start from now if no previous expiry
 
         if unit == 'phút':
             new_expiry_date += timedelta(minutes=value)
@@ -550,7 +554,9 @@ def generate_code_command(message):
         return
     
     args = telebot.util.extract_arguments(message.text).split()
-    if len(args) < 2 or len(args) > 3: # value, unit, quantity (optional)
+    # Cú pháp: /taokey <giá trị> <phút/giờ/ngày/tuần/tháng> <số lượng>
+    # Hoặc: /taokey 1 vĩnh_viễn <số lượng>
+    if not (len(args) >= 2 and len(args) <= 3):
         bot.reply_to(message, "Cú pháp sai. Ví dụ:\n"
                               "`/taokey <giá_trị> <phút/giờ/ngày/tuần/tháng> <số_lượng>`\n"
                               "Hoặc: `/taokey 1 vĩnh_viễn <số_lượng>`\n"
@@ -561,7 +567,7 @@ def generate_code_command(message):
     try:
         value_arg = args[0]
         unit_arg = args[1].lower()
-        quantity = int(args[2]) if len(args) == 3 else 1 # Default to 1 key if quantity not provided
+        quantity = int(args[2]) if len(args) == 3 else 1 # Mặc định tạo 1 key nếu không có số lượng
         
         valid_units = ['phút', 'giờ', 'ngày', 'tuần', 'tháng', 'vĩnh_viễn']
         if unit_arg not in valid_units:
@@ -569,7 +575,7 @@ def generate_code_command(message):
             return
         
         if unit_arg == 'vĩnh_viễn':
-            value = 1 # Value is not really used for perpetual, but kept for consistency
+            value = 1 # Giá trị không thực sự được dùng cho vĩnh viễn, nhưng giữ để nhất quán cấu trúc
             if not value_arg.isdigit() or int(value_arg) != 1:
                 bot.reply_to(message, "Đối với gói `vĩnh_viễn`, giá trị phải là `1`.", parse_mode='Markdown')
                 return
@@ -656,7 +662,15 @@ def get_stats(message):
     bot.reply_to(message, stats_text, parse_mode='Markdown')
 
 
-# --- Flask Routes cho Keep-Alive ---
+# --- Flask Routes cho Webhook và Keep-Alive ---
+# Endpoint mà Telegram sẽ gửi các bản cập nhật POST đến
+@app.route('/' + BOT_TOKEN, methods=['POST']) 
+def get_message():
+    json_string = request.get_data().decode('utf-8')
+    update = telebot.types.Update.de_json(json_string)
+    bot.process_new_updates([update])
+    return "!", 200 # Trả về tín hiệu thành công cho Telegram
+
 @app.route('/')
 def home():
     return "Bot is alive and running!"
@@ -677,17 +691,29 @@ def start_bot_threads():
             load_codes()
             load_prediction_stats() # Tải thống kê dự đoán khi khởi động
 
+            # Thiết lập webhook
+            # Lấy URL của ứng dụng từ biến môi trường (Render cung cấp) hoặc đặt mặc định
+            # THAY THẾ 'YOUR_RENDER_APP_URL.onrender.com' BẰNG URL THỰC TẾ CỦA ỨNG DỤNG RENDER CỦA BẠN
+            WEBHOOK_URL_BASE = os.environ.get('RENDER_EXTERNAL_HOSTNAME', 'YOUR_RENDER_APP_URL.onrender.com')
+            WEBHOOK_URL = f"https://{WEBHOOK_URL_BASE}/{BOT_TOKEN}"
+            
+            print(f"Setting webhook to: {WEBHOOK_URL}")
+            try:
+                # Luôn xóa webhook cũ trước khi đặt webhook mới để tránh lỗi Conflict
+                bot.remove_webhook() 
+                time.sleep(0.1) # Đợi một chút để Telegram xử lý yêu cầu trước đó
+                bot.set_webhook(url=WEBHOOK_URL)
+                print("Webhook set successfully.")
+            except Exception as e:
+                print(f"Error setting webhook: {e}")
+
             # Start prediction loop in a separate thread
             prediction_thread = Thread(target=prediction_loop, args=(prediction_stop_event,))
             prediction_thread.daemon = True
             prediction_thread.start()
             print("Prediction loop thread started.")
-
-            # Start bot polling in a separate thread
-            polling_thread = Thread(target=bot.infinity_polling, kwargs={'none_stop': True})
-            polling_thread.daemon = True
-            polling_thread.start()
-            print("Telegram bot polling thread started.")
+            
+            # KHÔNG CẦN bot.infinity_polling() khi dùng webhook, Flask sẽ xử lý
             
             bot_initialized = True
 
@@ -695,4 +721,6 @@ def start_bot_threads():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     print(f"Starting Flask app locally on port {port}")
-    app.run(host='0.0.0.0', port=port, debug=True)
+    # Đặt debug=False khi triển khai lên production
+    app.run(host='0.0.0.0', port=port, debug=False)
+

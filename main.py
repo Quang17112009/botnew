@@ -1,603 +1,698 @@
-import logging
+import telebot
 import requests
-import asyncio
-import os
-from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
-    ApplicationBuilder,
-    CallbackContext,
-)
-from flask import Flask, request
+import time
 import json
-import datetime
-import uuid
+import os
+import random
+import string
+from datetime import datetime, timedelta
+from threading import Thread, Event, Lock
 
-# Cấu hình logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+from flask import Flask, request
 
-# Cấu hình bot
-TOKEN = "8137068939:AAG19xO92yXsz_d9vz_m2aJW2Wh8JZnvSPQ"
-ADMIN_ID = 6915752059  # ID Telegram của admin
-API_URL = "https://apiluck2.onrender.com/predict"
+# --- Cấu hình Bot ---
+BOT_TOKEN = "8137068939:AAG19xO92yXsz_d9vz_m2aJW2Wh8JZnvSPQ"
+ADMIN_IDS = [6915752059]
 
-# Lấy URL của dịch vụ Render từ biến môi trường
-WEBHOOK_URL_BASE = os.environ.get("RENDER_EXTERNAL_HOSTNAME") 
-WEBHOOK_PATH = f"/{TOKEN}"
-if WEBHOOK_URL_BASE:
-    WEBHOOK_URL = f"https://{WEBHOOK_URL_BASE}{WEBHOOK_PATH}"
-else:
-    WEBHOOK_URL = None # Cần được cấu hình nếu không phải Render (ví dụ: cho local testing)
+DATA_FILE = 'user_data.json'
+CODES_FILE = 'codes.json'
+PREDICTION_STATS_FILE = 'prediction_stats.json' # File mới để lưu thống kê dự đoán
 
-# Dictionary để lưu trạng thái chạy dự đoán của từng người dùng
-user_prediction_status = {}
-# Dictionary để lưu trữ thông tin key và hạn sử dụng
-active_keys = {} # key: { 'expiry_date': datetime.datetime, 'used_by': user_id }
-user_active_packages = {} # user_id: key
-
-# Biến để lưu trữ tổng số lần dự đoán và số lần dự đoán đúng
-prediction_stats = {
-    "total_predictions": 0,
-    "correct_predictions": 0,
-    "last_actual_result": None,
-    "last_predicted_result": None
-}
-
-# Biến để lưu trữ phiên cuối cùng mà bot đã xử lý từ API
-last_api_phien_moi_processed = None
-
-# Flask app
+# --- Khởi tạo Flask App và Telegram Bot ---
 app = Flask(__name__)
-# Application instance sẽ được tạo và gán sau
-application_instance: Application = None
+bot = telebot.TeleBot(BOT_TOKEN)
 
-# Định nghĩa các hàm xử lý lệnh (giữ nguyên như trước)
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    user_id = user.id
+# Global flags và objects
+bot_enabled = True
+prediction_stop_event = Event() # Để kiểm soát luồng dự đoán
+bot_initialized = False # Cờ để đảm bảo bot chỉ được khởi tạo một lần
+bot_init_lock = Lock() # Khóa để tránh race condition khi khởi tạo
+
+# Global data structures
+user_data = {}
+GENERATED_CODES = {} # {code: {"value": 1, "type": "day", "used_by": null, "used_time": null}}
+last_prediction_phien = None # Lưu phiên cuối cùng đã dự đoán
+prediction_stats = {"correct": 0, "total": 0} # Thống kê dự đoán
+
+# --- Quản lý dữ liệu người dùng và code ---
+def load_user_data():
+    global user_data
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, 'r') as f:
+            try:
+                user_data = json.load(f)
+            except json.JSONDecodeError:
+                print(f"Lỗi đọc {DATA_FILE}. Khởi tạo lại dữ liệu người dùng.")
+                user_data = {}
+    else:
+        user_data = {}
+    print(f"Loaded {len(user_data)} user records from {DATA_FILE}")
+
+def save_user_data(data):
+    with open(DATA_FILE, 'w') as f:
+        json.dump(data, f, indent=4)
+
+def load_codes():
+    global GENERATED_CODES
+    if os.path.exists(CODES_FILE):
+        with open(CODES_FILE, 'r') as f:
+            try:
+                GENERATED_CODES = json.load(f)
+            except json.JSONDecodeError:
+                print(f"Lỗi đọc {CODES_FILE}. Khởi tạo lại mã code.")
+                GENERATED_CODES = {}
+    else:
+        GENERATED_CODES = {}
+    print(f"Loaded {len(GENERATED_CODES)} codes from {CODES_FILE}")
+
+def save_codes():
+    with open(CODES_FILE, 'w') as f:
+        json.dump(GENERATED_CODES, f, indent=4)
+
+def load_prediction_stats():
+    global prediction_stats
+    if os.path.exists(PREDICTION_STATS_FILE):
+        with open(PREDICTION_STATS_FILE, 'r') as f:
+            try:
+                prediction_stats = json.load(f)
+            except json.JSONDecodeError:
+                print(f"Lỗi đọc {PREDICTION_STATS_FILE}. Khởi tạo lại thống kê dự đoán.")
+                prediction_stats = {"correct": 0, "total": 0}
+    else:
+        prediction_stats = {"correct": 0, "total": 0}
+    print(f"Loaded prediction stats: Correct {prediction_stats['correct']}, Total {prediction_stats['total']}")
+
+def save_prediction_stats():
+    with open(PREDICTION_STATS_FILE, 'w') as f:
+        json.dump(prediction_stats, f, indent=4)
+
+def is_admin(user_id):
+    return user_id in ADMIN_IDS
+
+def check_subscription(user_id):
+    user_id_str = str(user_id)
+    if is_admin(user_id):
+        return True, "Bạn là Admin, quyền truy cập vĩnh viễn."
+
+    if user_id_str not in user_data or user_data[user_id_str].get('expiry_date') is None:
+        return False, "⚠️ Bạn chưa kích hoạt gói hoặc gói đã hết hạn."
+
+    expiry_date_str = user_data[user_id_str]['expiry_date']
+    if expiry_date_str == "Vĩnh viễn":
+        return True, "✅ Gói của bạn là vĩnh viễn."
+
+    expiry_date = datetime.strptime(expiry_date_str, '%Y-%m-%d %H:%M:%S')
+
+    if datetime.now() < expiry_date:
+        remaining_time = expiry_date - datetime.now()
+        days = remaining_time.days
+        hours = remaining_time.seconds // 3600
+        minutes = (remaining_time.seconds % 3600) // 60
+        # seconds = remaining_time.seconds % 60 # Bỏ giây để tin nhắn ngắn gọn hơn
+        return True, f"✅ Gói của bạn còn hạn đến: `{expiry_date_str}` ({days} ngày {hours} giờ {minutes} phút)."
+    else:
+        return False, "❌ Gói của bạn đã hết hạn."
+
+def get_subscription_status(user_id_str):
+    if user_id_str not in user_data or user_data[user_id_str].get('expiry_date') is None:
+        return "Chưa kích hoạt", "Chưa kích hoạt"
     
-    package_info = "Chưa kích hoạt"
-    expiry_info = "Chưa kích hoạt"
+    expiry_date_str = user_data[user_id_str]['expiry_date']
+    
+    if expiry_date_str == "Vĩnh viễn":
+        return "Vĩnh viễn", "Vĩnh viễn"
 
-    if user_id in user_active_packages:
-        key = user_active_packages[user_id]
-        if key in active_keys:
-            key_data = active_keys[key]
-            if key_data['expiry_date'] is None:
-                expiry_info = "Vĩnh viễn"
-                package_info = "Đã kích hoạt"
-            elif key_data['expiry_date'] > datetime.datetime.now():
-                expiry_info = key_data['expiry_date'].strftime("%H:%M %d-%m-%Y")
-                package_info = "Đã kích hoạt"
-            else:
-                del user_active_packages[user_id]
-                del active_keys[key]
+    expiry_date = datetime.strptime(expiry_date_str, '%Y-%m-%d %H:%M:%S')
+
+    if datetime.now() < expiry_date:
+        return "Đã kích hoạt", expiry_date_str
+    else:
+        return "Đã hết hạn", expiry_date_str
+
+# --- Lấy dữ liệu từ API mới ---
+def lay_du_lieu_tu_api_moi():
+    try:
+        response = requests.get("https://apiluck2.onrender.com/predict")
+        response.raise_for_status() # Báo lỗi nếu status code là lỗi HTTP
+        data = response.json()
+        return data
+    except requests.exceptions.RequestException as e:
+        print(f"Lỗi khi lấy dữ liệu từ API: {e}")
+        return None
+    except json.JSONDecodeError:
+        print("Lỗi giải mã JSON từ API. Phản hồi không phải JSON hợp lệ.")
+        return None
+
+# --- Logic chính của Bot dự đoán (chạy trong luồng riêng) ---
+def prediction_loop(stop_event: Event):
+    global last_prediction_phien, prediction_stats
+    print("Prediction loop started.")
+    while not stop_event.is_set():
+        if not bot_enabled:
+            time.sleep(10) # Ngủ lâu hơn khi bot bị tắt
+            continue
+
+        api_data = lay_du_lieu_tu_api_moi()
+        if not api_data:
+            time.sleep(5)
+            continue
+
+        current_phien = api_data.get("Phien_moi")
+        phien_du_doan = api_data.get("phien_du_doan")
+
+        if not all([current_phien, phien_du_doan]):
+            print("Dữ liệu API không đầy đủ (thiếu Phien_moi hoặc phien_du_doan). Bỏ qua phiên này.")
+            time.sleep(5)
+            continue
         
-    await update.message.reply_html(
-        f"🌟 CHÀO MỪNG **{user.first_name}** 🌟\n"
-        "🎉 Chào mừng đến với HeHe Bot 🎉\n"
-        f"📦 Gói hiện tại: {package_info}\n"
-        f"⏰ Hết hạn: {expiry_info}\n"
-        "💡 Dùng /help để xem các lệnh\n"
-        "————————-"
-    )
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    package_info = "Chưa kích hoạt"
-    
-    if user_id in user_active_packages:
-        key = user_active_packages[user_id]
-        if key in active_keys:
-            key_data = active_keys[key]
-            if key_data['expiry_date'] is None or key_data['expiry_date'] > datetime.datetime.now():
-                package_info = "Đã kích hoạt"
+        # Chỉ gửi tin nhắn nếu có phiên mới hoặc phiên dự đoán mới
+        if phien_du_doan != last_prediction_phien:
+            
+            ket_qua_hien_tai_raw = api_data.get("matches")[0].upper() if api_data.get("matches") else "?"
+            if ket_qua_hien_tai_raw == "T":
+                ket_qua_text = "TÀI"
+            elif ket_qua_hien_tai_raw == "X":
+                ket_qua_text = "XỈU"
             else:
-                del user_active_packages[user_id]
-                del active_keys[key]
+                ket_qua_text = "Không rõ"
+            
+            # API không trả về tổng 3 xúc xắc cụ thể. Dùng tạm "Tổng: XX" nếu có thể suy luận hoặc bỏ qua.
+            # Với API hiện tại, không có tổng trực tiếp của 3 xúc xắc, chỉ có tổng Tài/Xỉu
+            # Nên phần này sẽ hiển thị "??" hoặc bạn có thể chỉnh sửa nếu API thay đổi.
+            tong_ket_qua_hien_tai = "??" 
 
-    await update.message.reply_text(
-        f"📦 Gói hiện tại: {package_info}\n"
+            pattern = api_data.get("pattern", "Không có")
+            du_doan_ket_qua = api_data.get("du_doan", "Không rõ")
+            
+            prediction_message = (
+                f"🤖 ʟᴜᴄᴋʏᴡɪɴ\n"
+                f"🎯 ᴘʜɪᴇ̂ɴ {current_phien}\n"
+                f"🎲 ᴋᴇ̂́ᴛ ǫᴜᴀ̉ : {ket_qua_text} {tong_ket_qua_hien_tai}\n"
+                f"🧩 ᴘᴀᴛᴛᴇʀɴ : {pattern.upper()}\n"
+                f"🎮  ᴘʜɪᴇ̂ɴ {phien_du_doan} : {du_doan_ket_qua} (ᴍᴏᴅᴇʟ ʙᴀꜱɪᴄ)\n"
+                "————————-"
+            )
+
+            # Cập nhật thống kê dự đoán
+            if du_doan_ket_qua.lower().strip() == ket_qua_text.lower().strip(): # So sánh dự đoán với kết quả thực tế
+                prediction_stats['correct'] += 1
+            prediction_stats['total'] += 1
+            save_prediction_stats()
+
+
+            for user_id_str, user_info in list(user_data.items()):
+                user_id = int(user_id_str)
+                is_sub, sub_message = check_subscription(user_id)
+                
+                # Chỉ gửi cho những người dùng đã bật /chaymodelbasic
+                if is_sub and user_info.get('running_prediction'):
+                    try:
+                        bot.send_message(user_id, prediction_message)
+                    except telebot.apihelper.ApiTelegramException as e:
+                        if "bot was blocked by the user" in str(e) or "user is deactivated" in str(e):
+                            print(f"Người dùng {user_id} đã chặn bot hoặc bị vô hiệu hóa.")
+                        else:
+                            print(f"Lỗi gửi tin nhắn cho user {user_id}: {e}")
+                    except Exception as e:
+                        print(f"Lỗi không xác định khi gửi tin nhắn cho user {user_id}: {e}")
+            
+            print(f"Gửi dự đoán mới cho phiên {phien_du_doan}. Thống kê: {prediction_stats['correct']}/{prediction_stats['total']}")
+            last_prediction_phien = phien_du_doan
+
+        time.sleep(5) # Đợi 5 giây trước khi kiểm tra phiên mới
+    print("Prediction loop stopped.")
+
+# --- Xử lý lệnh Telegram ---
+
+@bot.message_handler(commands=['start'])
+def send_welcome(message):
+    user_id = str(message.chat.id)
+    username = message.from_user.first_name or message.from_user.username
+    
+    if user_id not in user_data:
+        user_data[user_id] = {
+            'username': username,
+            'expiry_date': None,
+            'running_prediction': False # Mặc định không chạy dự đoán
+        }
+        save_user_data(user_data)
+    else:
+        user_data[user_id]['username'] = username # Cập nhật username nếu có thay đổi
+        save_user_data(user_data)
+
+    current_package, expiry_status = get_subscription_status(user_id)
+
+    welcome_message = (
+        f"🌟 CHÀO MỪNG {username} 🌟\n"
+        "🎉 Chào mừng đến với HeHe Bot 🎉\n"
+        f"📦 Gói hiện tại: {current_package}\n"
+        f"⏰ Hết hạn: {expiry_status}\n"
+        "💡 Dùng /help để xem các lệnh"
+    )
+    bot.reply_to(message, welcome_message)
+
+@bot.message_handler(commands=['help'])
+def show_help(message):
+    user_id_str = str(message.chat.id)
+    current_package, expiry_status = get_subscription_status(user_id_str)
+
+    help_text = (
+        f"📦 Gói hiện tại: {current_package}\n"
         "🔥 Các lệnh hỗ trợ:\n"
-        "✅ /start - Đăng ký và bắt đầu\n"
-        "🔑 /key [mã] - Kích hoạt gói\n"
-        "🎮 /chaymodelbasic - Chạy dự đoán  (LUCK)\n"
-        "🛑 /stop - Dừng dự đoán\n"
-        "🛠️ /admin - Lệnh dành cho admin\n"
+        "✅ `/start` - Đăng ký và bắt đầu\n"
+        "🔑 `/key [mã]` - Kích hoạt gói\n"
+        "🎮 `/chaymodelbasic` - Chạy dự đoán  (LUCK)\n"
+        "🛑 `/stop` - Dừng dự đoán\n"
+        "🛠️ `/admin` - Lệnh dành cho admin\n"
         "📬 Liên hệ:\n"
-        f"👤 Admin: t.me/heheviptool\n"
+        "👤 Admin: t.me/heheviptool\n"
         "——————"
     )
+    bot.reply_to(message, help_text, parse_mode='Markdown')
 
-async def activate_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    if not context.args:
-        await update.message.reply_text("Vui lòng cung cấp mã kích hoạt. Ví dụ: /key ABCXYZ")
+@bot.message_handler(commands=['key'])
+def use_code(message):
+    code_str = telebot.util.extract_arguments(message.text)
+    user_id = str(message.chat.id)
+
+    if not code_str:
+        bot.reply_to(message, "Vui lòng nhập mã code. Ví dụ: `/key ABCXYZ`", parse_mode='Markdown')
         return
     
-    input_key = context.args[0]
-    
-    if input_key in active_keys:
-        key_data = active_keys[input_key]
-        if key_data['used_by'] is not None and key_data['used_by'] != user_id:
-            await update.message.reply_text("Mã này đã được sử dụng bởi người khác.")
-            return
+    if code_str not in GENERATED_CODES:
+        bot.reply_to(message, "❌ Mã code không tồn tại hoặc đã hết hạn.")
+        return
 
-        if key_data['expiry_date'] is None:
-            user_active_packages[user_id] = input_key
-            active_keys[input_key]['used_by'] = user_id
-            await update.message.reply_text("🎉 Gói của bạn đã được kích hoạt vĩnh viễn!")
-        elif key_data['expiry_date'] > datetime.datetime.now():
-            user_active_packages[user_id] = input_key
-            active_keys[input_key]['used_by'] = user_id
-            expiry_str = key_data['expiry_date'].strftime("%H:%M %d-%m-%Y")
-            await update.message.reply_text(f"🎉 Gói của bạn đã được kích hoạt thành công! Hết hạn vào: {expiry_str}")
-        else:
-            await update.message.reply_text("Mã này đã hết hạn. Vui lòng liên hệ Admin.")
-            del active_keys[input_key]
-            if user_id in user_active_packages and user_active_packages[user_id] == input_key:
-                del user_active_packages[user_id]
+    code_info = GENERATED_CODES[code_str]
+    if code_info.get('used_by') is not None:
+        bot.reply_to(message, "❌ Mã code này đã được sử dụng rồi.")
+        return
+
+    # Apply extension
+    current_expiry_str = user_data.get(user_id, {}).get('expiry_date')
+    
+    if code_info['type'] == 'vĩnh viễn':
+        new_expiry_date_str = "Vĩnh viễn"
     else:
-        await update.message.reply_text("Mã kích hoạt không hợp lệ. Vui lòng kiểm tra lại hoặc liên hệ Admin.")
-
-async def send_prediction_message(chat_id: int, prediction_data: dict, bot_obj) -> None:
-    try:
-        phien_moi = prediction_data.get("Phien_moi", "N/A")
-        matches = prediction_data.get("matches", [])
-        
-        ket_qua = "TÀI" if "t" in matches else "XỈU" if "x" in matches else "N/A"
-        
-        pattern = prediction_data.get("pattern", "N/A")
-        phien_du_doan = prediction_data.get("phien_du_doan", "N/A")
-        du_doan_ket_qua = prediction_data.get("du_doan", "N/A")
-
-        message_text = (
-            f"🤖 ʟᴜᴄᴋʏᴡɪɴ \n"
-            f"🎯 ᴘʜɪᴇ̂ɴ {phien_moi} \n"
-            f"🎲 ᴋᴇ̂́ᴛ ǫᴜ̉ᴀ : {ket_qua} \n"
-            f"🧩 ᴘᴀᴛᴛᴇʀɴ : {pattern} \n"
-            f"🎮  ᴘʜɪᴇ̂ɴ {phien_du_doan} : {du_doan_ket_qua} (ᴍᴏᴅᴇʟ ʙᴀꜱɪᴄ)\n"
-            "————————-"
-        )
-        
-        if ket_qua != "N/A" and du_doan_ket_qua != "N/A":
-            prediction_stats["total_predictions"] += 1
-            if (ket_qua == "TÀI" and du_doan_ket_qua == "Tài") or \
-               (ket_qua == "XỈU" and du_doan_ket_qua == "Xỉu"):
-                prediction_stats["correct_predictions"] += 1
-            prediction_stats["last_actual_result"] = ket_qua
-            prediction_stats["last_predicted_result"] = du_doan_ket_qua
-        
-        await bot_obj.send_message(chat_id=chat_id, text=message_text)
-
-    except Exception as e:
-        logger.error(f"Lỗi khi gửi tin nhắn dự đoán cho chat_id {chat_id}: {e}")
-
-async def fetch_and_send_prediction_task(context: CallbackContext) -> None:
-    global last_api_phien_moi_processed
-    
-    try:
-        response = requests.get(API_URL)
-        response.raise_for_status()
-        data = response.json()
-        current_phien_moi = data.get("Phien_moi")
-
-        if current_phien_moi and current_phien_moi != last_api_phien_moi_processed:
-            logger.info(f"Phát hiện phiên mới: {current_phien_moi}. Đang gửi dự đoán...")
-            
-            users_to_predict_in_this_cycle = []
-            for user_id, status in list(user_prediction_status.items()):
-                if status:
-                    if user_id in user_active_packages:
-                        key = user_active_packages[user_id]
-                        if key in active_keys:
-                            key_data = active_keys[key]
-                            if key_data['expiry_date'] is None or key_data['expiry_date'] > datetime.datetime.now():
-                                users_to_predict_in_this_cycle.append(user_id)
-                            else:
-                                user_prediction_status[user_id] = False
-                                await context.bot.send_message(chat_id=user_id, text="⚠️ Gói của bạn đã hết hạn. Vui lòng kích hoạt lại để tiếp tục nhận dự đoán.")
-                                del user_active_packages[user_id]
-                                del active_keys[key]
-                        else:
-                            user_prediction_status[user_id] = False
-                            await context.bot.send_message(chat_id=user_id, text="⚠️ Gói của bạn không còn hiệu lực. Vui lòng liên hệ Admin.")
-                            del user_active_packages[user_id]
-                    else:
-                        user_prediction_status[user_id] = False
-                        await context.bot.send_message(chat_id=user_id, text="⚠️ Vui lòng kích hoạt gói để sử dụng chức năng dự đoán. Dùng /key [mã].")
-            
-            for chat_id in users_to_predict_in_this_cycle:
-                await send_prediction_message(chat_id, data, context.bot)
-                await asyncio.sleep(0.1)
-            
-            last_api_phien_moi_processed = current_phien_moi
+        if current_expiry_str and current_expiry_str != "Vĩnh viễn":
+            current_expiry_date = datetime.strptime(current_expiry_str, '%Y-%m-%d %H:%M:%S')
+            # If current expiry is in the past, start from now
+            if datetime.now() > current_expiry_date:
+                new_expiry_date = datetime.now()
+            else:
+                new_expiry_date = current_expiry_date
         else:
-            logger.info(f"Phiên API hiện tại ({current_phien_moi}) chưa thay đổi.")
-            
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Lỗi khi gọi API: {e}")
-    except json.JSONDecodeError as e:
-        logger.error(f"Lỗi phân tích JSON từ API: {e}")
-    except Exception as e:
-        logger.error(f"Lỗi không xác định trong fetch_and_send_prediction_task: {e}")
+            new_expiry_date = datetime.now() # Start from now if no previous expiry or if it was "Vĩnh viễn" but now changing to timed
 
-async def chay_model_basic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
+        value = code_info['value']
+        if code_info['type'] == 'phút':
+            new_expiry_date += timedelta(minutes=value)
+        elif code_info['type'] == 'giờ':
+            new_expiry_date += timedelta(hours=value)
+        elif code_info['type'] == 'ngày':
+            new_expiry_date += timedelta(days=value)
+        elif code_info['type'] == 'tuần':
+            new_expiry_date += timedelta(weeks=value)
+        elif code_info['type'] == 'tháng':
+            new_expiry_date += timedelta(days=value*30) # Ước tính 1 tháng = 30 ngày
+        
+        new_expiry_date_str = new_expiry_date.strftime('%Y-%m-%d %H:%M:%S')
     
-    if user_id not in user_active_packages:
-        await update.message.reply_text("⚠️ Vui lòng kích hoạt gói để sử dụng chức năng dự đoán. Dùng /key [mã].")
+    user_data.setdefault(user_id, {})['expiry_date'] = new_expiry_date_str
+    user_data[user_id]['username'] = message.from_user.first_name or message.from_user.username
+    
+    GENERATED_CODES[code_str]['used_by'] = user_id
+    GENERATED_CODES[code_str]['used_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    save_user_data(user_data)
+    save_codes()
+
+    bot.reply_to(message, 
+                 f"🎉 Bạn đã đổi mã code thành công! Gói của bạn đã được gia hạn thêm **{value} {code_info['type']}**.\n"
+                 f"Ngày hết hạn mới: `{user_data[user_id]['expiry_date']}`", 
+                 parse_mode='Markdown')
+
+@bot.message_handler(commands=['chaymodelbasic'])
+def start_prediction_command(message):
+    user_id = str(message.chat.id)
+    is_sub, sub_message = check_subscription(int(user_id))
+    
+    if not is_sub:
+        bot.reply_to(message, sub_message + "\nVui lòng liên hệ Admin t.me/heheviptool để được hỗ trợ.", parse_mode='Markdown')
         return
     
-    key = user_active_packages[user_id]
-    if key not in active_keys or (active_keys[key]['expiry_date'] is not None and active_keys[key]['expiry_date'] <= datetime.datetime.now()):
-        await update.message.reply_text("⚠️ Gói của bạn đã hết hạn hoặc không còn hiệu lực. Vui lòng kích hoạt lại.")
-        del user_active_packages[user_id]
-        if key in active_keys: del active_keys[key]
+    if not bot_enabled:
+        bot.reply_to(message, f"❌ Bot dự đoán hiện đang tạm dừng bởi Admin. Vui lòng thử lại sau.", parse_mode='Markdown')
         return
 
-    if user_prediction_status.get(user_id):
-        await update.message.reply_text("Dự đoán đã được bật rồi.")
-        return
-    
-    user_prediction_status[user_id] = True
-    await update.message.reply_text("⚡️ Đang chạy dự đoán (LUCK) từ Model Basic... Vui lòng đợi kết quả.")
-    
-async def stop_prediction(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    if not user_prediction_status.get(user_id):
-        await update.message.reply_text("Dự đoán chưa được bật.")
-        return
+    user_data[user_id]['running_prediction'] = True
+    save_user_data(user_data)
+    bot.reply_to(message, "✅ Bạn đã bật chế độ nhận dự đoán từ bot. Bot sẽ tự động gửi dự đoán các phiên mới nhất tại đây.")
 
-    user_prediction_status[user_id] = False
-    await update.message.reply_text("🛑 Đã dừng dự đoán.")
+@bot.message_handler(commands=['stop'])
+def stop_prediction_command(message):
+    user_id = str(message.chat.id)
+    user_data[user_id]['running_prediction'] = False
+    save_user_data(user_data)
+    bot.reply_to(message, "✅ Bạn đã dừng nhận dự đoán từ bot.")
 
-async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None: # Đã sửa lỗi Update.Update thành Update
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("Bạn không có quyền sử dụng lệnh này.")
+# --- Lệnh Admin ---
+@bot.message_handler(commands=['admin'])
+def admin_menu(message):
+    if not is_admin(message.chat.id):
+        bot.reply_to(message, "Bạn không có quyền sử dụng lệnh này.")
         return
     
-    await update.message.reply_text(
-        "🛠️ Lệnh dành cho Admin:\n"
-        "🔑 /taokey [giờ/ngày/tuần/tháng/năm/vĩnhviễn] [số lượng (nếu là giờ/ngày/tuần/tháng/năm)] - Tạo key kích hoạt.\n"
-        "📊 /check - Kiểm tra số lần dự đoán đúng của bot.\n"
-        "📢 /tbao [tin nhắn] - Gửi thông báo đến tất cả người dùng đã tương tác với bot.\n"
+    admin_help_text = (
+        "👑 **LỆNH ADMIN** 👑\n\n"
+        "🔹 `/full <id>`: Xem thông tin người dùng (để trống ID để xem của bạn).\n"
+        "🔹 `/giahan <id> <số ngày/giờ/tuần/tháng/vĩnh_viễn>`: Gia hạn tài khoản. VD: `/giahan 12345 1 ngày`, `/giahan 67890 vĩnh_viễn`.\n"
+        "🔹 `/tb <nội dung>`: Gửi thông báo đến tất cả người dùng.\n"
+        "🔹 `/tatbot`: Tắt mọi hoạt động dự đoán của bot.\n"
+        "🔹 `/mokbot`: Mở lại hoạt động dự đoán của bot.\n"
+        "🔹 `/taokey <giá trị> <phút/giờ/ngày/tuần/tháng/vĩnh_viễn> <số lượng>`: Tạo mã key. VD: `/taokey 1 ngày 5`, `/taokey 1 vĩnh_viễn 1`.\n"
+        "🔹 `/check`: Kiểm tra thống kê dự đoán của bot.\n"
+        "🔹 `/thongke` : Thống kê số lượng người dùng và code đã dùng."
     )
+    bot.reply_to(message, admin_help_text, parse_mode='Markdown')
 
-async def tao_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("Bạn không có quyền sử dụng lệnh này.")
+@bot.message_handler(commands=['full'])
+def get_user_info(message):
+    if not is_admin(message.chat.id):
+        bot.reply_to(message, "Bạn không có quyền sử dụng lệnh này.")
         return
     
-    if len(context.args) < 1:
-        await update.message.reply_text("Vui lòng cung cấp định dạng và số lượng (nếu có). Ví dụ: /taokey ngày 7 hoặc /taokey vĩnhviễn")
-        return
+    args = telebot.util.extract_arguments(message.text).split()
+    target_user_id_str = str(message.chat.id)
+    if args and args[0].isdigit():
+        target_user_id_str = args[0]
     
-    duration_type = context.args[0].lower()
-    amount = None
-    
-    if duration_type not in ["giờ", "ngày", "tuần", "tháng", "năm", "vĩnhviễn"]:
-        await update.message.reply_text("Định dạng không hợp lệ. Vui lòng chọn: giờ, ngày, tuần, tháng, năm, vĩnhviễn.")
+    if target_user_id_str not in user_data:
+        bot.reply_to(message, f"Không tìm thấy thông tin cho người dùng ID `{target_user_id_str}`.")
         return
 
-    if duration_type != "vĩnhviễn":
-        if len(context.args) < 2:
-            await update.message.reply_text(f"Vui lòng cung cấp số lượng {duration_type}. Ví dụ: /taokey {duration_type} 7")
-            return
-        try:
-            amount = int(context.args[1])
-            if amount <= 0:
-                await update.message.reply_text("Số lượng phải là một số nguyên dương.")
-                return
-        except ValueError:
-            await update.message.reply_text("Số lượng không hợp lệ. Vui lòng nhập số nguyên.")
-            return
+    user_info = user_data[target_user_id_str]
+    expiry_date_str = user_info.get('expiry_date', 'Chưa kích hoạt')
+    username = user_info.get('username', 'Không rõ')
+    running_pred_status = "Đang chạy" if user_info.get('running_prediction') else "Đã dừng"
 
-    new_key = str(uuid.uuid4()).replace('-', '')[:10].upper()
-    expiry_date = None
-
-    if duration_type == "giờ":
-        expiry_date = datetime.datetime.now() + datetime.timedelta(hours=amount)
-    elif duration_type == "ngày":
-        expiry_date = datetime.datetime.now() + datetime.timedelta(days=amount)
-    elif duration_type == "tuần":
-        expiry_date = datetime.datetime.now() + datetime.timedelta(weeks=amount)
-    elif duration_type == "tháng":
-        expiry_date = datetime.datetime.now() + datetime.timedelta(days=amount * 30)
-    elif duration_type == "năm":
-        expiry_date = datetime.datetime.now() + datetime.timedelta(days=amount * 365)
-
-    active_keys[new_key] = {
-        'expiry_date': expiry_date,
-        'used_by': None
-    }
-    
-    expiry_str = "Vĩnh viễn" if expiry_date is None else expiry_date.strftime("%H:%M %d-%m-%Y")
-    await update.message.reply_text(f"Đã tạo key mới: `{new_key}` (Hết hạn: {expiry_str})", parse_mode='Markdown')
-
-async def check_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("Bạn không có quyền sử dụng lệnh này.")
-        return
-
-    total = prediction_stats["total_predictions"]
-    correct = prediction_stats["correct_predictions"]
-    accuracy = (correct / total * 100) if total > 0 else 0
-
-    last_actual = prediction_stats["last_actual_result"] if prediction_stats["last_actual_result"] else "N/A"
-    last_predicted = prediction_stats["last_predicted_result"] if prediction_stats["last_predicted_result"] else "N/A"
-
-    await update.message.reply_text(
-        f"📊 Thống kê dự đoán của Bot:\n"
-        f"Tổng số dự đoán: {total}\n"
-        f"Số lần dự đoán đúng: {correct}\n"
-        f"Tỷ lệ chính xác: {accuracy:.2f}%\n"
-        f"Kết quả thực tế gần nhất: {last_actual}\n"
-        f"Dự đoán gần nhất: {last_predicted}"
+    info_text = (
+        f"**THÔNG TIN NGƯỜI DÙNG**\n"
+        f"**ID:** `{target_user_id_str}`\n"
+        f"**Tên:** @{username}\n"
+        f"**Ngày hết hạn:** `{expiry_date_str}`\n"
+        f"**Trạng thái nhận dự đoán:** {running_pred_status}"
     )
+    bot.reply_to(message, info_text, parse_mode='Markdown')
 
-async def send_to_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("Bạn không có quyền sử dụng lệnh này.")
+@bot.message_handler(commands=['giahan'])
+def extend_subscription(message):
+    if not is_admin(message.chat.id):
+        bot.reply_to(message, "Bạn không có quyền sử dụng lệnh này.")
         return
-
-    if not context.args:
-        await update.message.reply_text("Vui lòng cung cấp tin nhắn để gửi. Ví dụ: /tbao Thông báo quan trọng!")
+    
+    args = telebot.util.extract_arguments(message.text).split()
+    if len(args) < 2 or len(args) > 3:
+        bot.reply_to(message, "Cú pháp sai. Ví dụ: `/giahan <id_nguoi_dung> <số_lượng> <phút/giờ/ngày/tuần/tháng>` hoặc `/giahan <id_nguoi_dung> vĩnh_viễn`.\n"
+                              "Ví dụ: `/giahan 12345 1 ngày` hoặc `/giahan 67890 vĩnh_viễn`", parse_mode='Markdown')
         return
+    
+    target_user_id_str = args[0]
+    unit_or_value = args[1].lower()
 
-    message_to_send = " ".join(context.args)
-    sent_count = 0
-    failed_count = 0
+    if target_user_id_str not in user_data:
+        user_data[target_user_id_str] = {
+            'username': "UnknownUser",
+            'expiry_date': None,
+            'running_prediction': False
+        }
+        bot.send_message(message.chat.id, f"Đã tạo tài khoản mới cho user ID `{target_user_id_str}`.")
 
-    all_chat_ids = set(user_prediction_status.keys())
-    for user_id in user_active_packages:
-        all_chat_ids.add(user_id)
-    all_chat_ids.add(ADMIN_ID)
+    if unit_or_value == 'vĩnh_viễn':
+        new_expiry_date_str = "Vĩnh viễn"
+        value_display = ""
+        unit_display = "vĩnh viễn"
+    else:
+        if not args[1].isdigit() or not (len(args) == 3 and args[2].lower() in ['phút', 'giờ', 'ngày', 'tuần', 'tháng']):
+            bot.reply_to(message, "Cú pháp sai. Ví dụ: `/giahan <id_nguoi_dung> <số_lượng> <phút/giờ/ngày/tuần/tháng>` hoặc `/giahan <id_nguoi_dung> vĩnh_viễn`.", parse_mode='Markdown')
+            return
 
-    await update.message.reply_text("Đang gửi thông báo đến người dùng. Vui lòng đợi...")
+        value = int(args[1])
+        unit = args[2].lower()
+        value_display = value
+        unit_display = unit
 
-    for chat_id in all_chat_ids:
+        current_expiry_str = user_data[target_user_id_str].get('expiry_date')
+        if current_expiry_str and current_expiry_str != "Vĩnh viễn":
+            current_expiry_date = datetime.strptime(current_expiry_str, '%Y-%m-%d %H:%M:%S')
+            if datetime.now() > current_expiry_date:
+                new_expiry_date = datetime.now()
+            else:
+                new_expiry_date = current_expiry_date
+        else:
+            new_expiry_date = datetime.now()
+
+        if unit == 'phút':
+            new_expiry_date += timedelta(minutes=value)
+        elif unit == 'giờ':
+            new_expiry_date += timedelta(hours=value)
+        elif unit == 'ngày':
+            new_expiry_date += timedelta(days=value)
+        elif unit == 'tuần':
+            new_expiry_date += timedelta(weeks=value)
+        elif unit == 'tháng':
+            new_expiry_date += timedelta(days=value*30) # Ước tính 1 tháng = 30 ngày
+        
+        new_expiry_date_str = new_expiry_date.strftime('%Y-%m-%d %H:%M:%S')
+    
+    user_data[target_user_id_str]['expiry_date'] = new_expiry_date_str
+    save_user_data(user_data)
+    
+    bot.reply_to(message, 
+                 f"Đã gia hạn thành công cho user ID `{target_user_id_str}` thêm **{value_display} {unit_display}**.\n"
+                 f"Ngày hết hạn mới: `{user_data[target_user_id_str]['expiry_date']}`",
+                 parse_mode='Markdown')
+    
+    try:
+        bot.send_message(int(target_user_id_str), 
+                         f"🎉 Tài khoản của bạn đã được gia hạn thêm **{value_display} {unit_display}** bởi Admin!\n"
+                         f"Ngày hết hạn mới của bạn là: `{user_data[target_user_id_str]['expiry_date']}`",
+                         parse_mode='Markdown')
+    except telebot.apihelper.ApiTelegramException as e:
+        if "bot was blocked by the user" in str(e):
+            pass
+        else:
+            print(f"Không thể thông báo gia hạn cho user {target_user_id_str}: {e}")
+
+@bot.message_handler(commands=['tb'])
+def send_broadcast(message):
+    if not is_admin(message.chat.id):
+        bot.reply_to(message, "Bạn không có quyền sử dụng lệnh này.")
+        return
+    
+    broadcast_text = telebot.util.extract_arguments(message.text)
+    if not broadcast_text:
+        bot.reply_to(message, "Vui lòng nhập nội dung thông báo. Ví dụ: `/tb Bot sẽ bảo trì vào 2h sáng mai.`", parse_mode='Markdown')
+        return
+    
+    success_count = 0
+    fail_count = 0
+    for user_id_str in list(user_data.keys()):
         try:
-            await context.bot.send_message(chat_id=chat_id, text=f"📢 **THÔNG BÁO TỪ ADMIN** 📢\n\n{message_to_send}", parse_mode='Markdown')
-            sent_count += 1
-            await asyncio.sleep(0.1)
+            bot.send_message(int(user_id_str), f"📢 **THÔNG BÁO TỪ ADMIN** 📢\n\n{broadcast_text}", parse_mode='Markdown')
+            success_count += 1
+            time.sleep(0.1) # Tránh bị rate limit
+        except telebot.apihelper.ApiTelegramException as e:
+            fail_count += 1
+            if "bot was blocked by the user" in str(e) or "user is deactivated" in str(e):
+                pass
+            else:
+                print(f"Lỗi không gửi được thông báo cho user {user_id_str}: {e}")
         except Exception as e:
-            logger.error(f"Không thể gửi tin nhắn đến chat_id {chat_id}: {e}")
-            failed_count += 1
+            print(f"Lỗi không xác định khi gửi thông báo cho user {user_id_str}: {e}")
+            fail_count += 1
+                
+    bot.reply_to(message, f"Đã gửi thông báo đến {success_count} người dùng. Thất bại: {fail_count}.")
+    save_user_data(user_data)
+
+@bot.message_handler(commands=['tatbot'])
+def disable_bot_command(message):
+    global bot_enabled
+    if not is_admin(message.chat.id):
+        bot.reply_to(message, "Bạn không có quyền sử dụng lệnh này.")
+        return
+
+    if not bot_enabled:
+        bot.reply_to(message, "Bot dự đoán đã và đang tắt rồi.")
+        return
+
+    bot_enabled = False
+    bot.reply_to(message, f"✅ Bot dự đoán đã được tắt bởi Admin.")
     
-    await update.message.reply_text(f"Đã gửi tin nhắn đến {sent_count} người dùng. Thất bại: {failed_count}.")
+@bot.message_handler(commands=['mokbot'])
+def enable_bot_command(message):
+    global bot_enabled
+    if not is_admin(message.chat.id):
+        bot.reply_to(message, "Bạn không có quyền sử dụng lệnh này.")
+        return
 
-# Function to setup the bot and schedule jobs
-async def setup_bot():
-    global application_instance
+    if bot_enabled:
+        bot.reply_to(message, "Bot dự đoán đã và đang hoạt động rồi.")
+        return
+
+    bot_enabled = True
+    bot.reply_to(message, "✅ Bot dự đoán đã được mở lại bởi Admin.")
     
-    # Xây dựng ứng dụng bot
-    application_instance = ApplicationBuilder().token(TOKEN).build()
-
-    # Đăng ký các trình xử lý lệnh
-    application_instance.add_handler(CommandHandler("start", start))
-    application_instance.add_handler(CommandHandler("help", help_command))
-    application_instance.add_handler(CommandHandler("key", activate_key))
-    application_instance.add_handler(CommandHandler("chaymodelbasic", chay_model_basic))
-    application_instance.add_handler(CommandHandler("stop", stop_prediction))
-    application_instance.add_handler(CommandHandler("admin", admin_command))
+@bot.message_handler(commands=['taokey'])
+def generate_code_command(message):
+    if not is_admin(message.chat.id):
+        bot.reply_to(message, "Bạn không có quyền sử dụng lệnh này.")
+        return
     
-    application_instance.add_handler(CommandHandler("taokey", tao_key))
-    application_instance.add_handler(CommandHandler("check", check_stats))
-    application_instance.add_handler(CommandHandler("tbao", send_to_all))
-
-    # Đặt webhook cho bot
-    if WEBHOOK_URL:
-        logger.info(f"Setting webhook to: {WEBHOOK_URL}")
-        await application_instance.bot.set_webhook(url=WEBHOOK_URL)
-    else:
-        logger.warning("WEBHOOK_URL not set. Bot might not receive updates correctly.")
+    args = telebot.util.extract_arguments(message.text).split()
+    if len(args) < 2 or len(args) > 3: # value, unit, quantity (optional)
+        bot.reply_to(message, "Cú pháp sai. Ví dụ:\n"
+                              "`/taokey <giá_trị> <phút/giờ/ngày/tuần/tháng> <số_lượng>`\n"
+                              "Hoặc: `/taokey 1 vĩnh_viễn <số_lượng>`\n"
+                              "Ví dụ: `/taokey 1 ngày 5` (tạo 5 key 1 ngày)\n"
+                              "Hoặc: `/taokey 1 vĩnh_viễn 1` (tạo 1 key vĩnh viễn)", parse_mode='Markdown')
+        return
     
-    # Schedule the periodic task to fetch predictions
-    application_instance.job_queue.run_repeating(fetch_and_send_prediction_task, interval=5, first=1)
-    logger.info("Telegram bot tasks scheduled.")
-
-# Webhook handler
-@app.route(WEBHOOK_PATH, methods=["POST"])
-async def telegram_webhook():
-    if application_instance is None:
-        logger.error("Application instance is None. Webhook cannot be processed.")
-        return "Internal server error", 500
-    
-    update_data = request.get_json(force=True)
-    update = Update.de_json(update_data, application_instance.bot)
-    
-    # Process update asynchronously
-    await application_instance.process_update(update)
-    return "ok"
-
-# Route cho Render để kiểm tra trạng thái
-@app.route('/')
-def index():
-    return "Bot is running and listening for webhooks!"
-
-# Function to run the Flask app and set up bot.
-# This function will be the entry point for Gunicorn.
-def run_app():
-    # Setup bot asynchronously
-    asyncio.run(setup_bot())
-    # Gunicorn will manage the Flask app lifecycle.
-    # We do NOT call app.run() here when using Gunicorn.
-    # This function should simply exist for Gunicorn to call `bot:app`
-    # and the Flask app will then handle incoming requests,
-    # while the job_queue runs in the background within the
-    # python-telegram-bot Application's event loop.
-    logger.info("Flask app is ready to serve. Bot tasks are running.")
-
-# Dòng này cần được đặt ở cuối file và là entry point cho Gunicorn
-if __name__ == "__main__":
-    # If running locally, you might want to call app.run() directly for testing.
-    # But for Render/Gunicorn, this block is typically not executed directly for Flask part.
-    # Instead, Gunicorn imports the `app` object and runs it.
-    
-    # For local testing, you can uncomment this:
-    # asyncio.run(setup_bot())
-    # port = int(os.environ.get("PORT", 8080))
-    # app.run(host="0.0.0.0", port=port)
-    
-    # When Gunicorn runs `gunicorn bot:app`, it imports `app` directly.
-    # The `setup_bot()` needs to be called to initialize the telegram bot
-    # and its JobQueue.
-    # A common pattern for Gunicorn is to have a `main` function or similar
-    # that sets up the application.
-    
-    # The `setup_bot` will run and schedule jobs.
-    # The Flask app (`app`) will then listen for requests.
-    # The problem is that Gunicorn runs `app` directly, not `main()`.
-    # So `setup_bot()` needs to be called when `app` is initialized.
-    
-    # Let's ensure setup_bot is called when the module is loaded if
-    # Gunicorn is importing it, or directly if __name__ == "__main__"
-    # To handle both, we'll call setup_bot as part of the app lifecycle
-    # which is tricky with Flask and ptb's async nature.
-
-    # A better approach for Gunicorn with async initialization:
-    # Use Flask's `@app.before_first_request` or similar, but that's for sync Flask.
-    # For async Flask, we need to manually manage the lifecycle.
-
-    # Let's try to initialize the bot application when the module is first loaded
-    # and then ensure its async parts are run.
-
-    # This structure is often best handled by creating the Application outside main
-    # and using a custom command for Gunicorn or a specific entrypoint.
-    
-    # For simplicity and to directly address the error:
-    # The `setup_bot()` should be called when `app` is run by Gunicorn.
-    # Gunicorn uses a WSGI server model. A common way is to make `app` callable
-    # and have it perform the setup.
-
-    # Let's define an async function to do the setup and make Flask run it.
-    # This requires a bit of a Flask ASGI server setup.
-    # But the current python-telegram-bot Application is designed for its own loop.
-
-    # Let's revert to a simpler method that sometimes works with Gunicorn
-    # by ensuring the `Application` is fully built and running its background tasks
-    # before Flask starts accepting requests.
-
-    # --- FINAL ATTEMPT FOR SIMPLICITY AND COMPATIBILITY ---
-    # The core issue is that `application_instance.job_queue` is `None` until
-    # `application_instance.run_polling()` or `application_instance.run_webhook()`
-    # has started its event loop.
-    # When using Gunicorn, you typically expose the Flask `app` object.
-    # The `python-telegram-bot` `Application` needs its own event loop to manage `JobQueue`.
-
-    # Let's try to run the bot's event loop in a background thread
-    # and the Flask app in the main thread (managed by Gunicorn).
-    # This was the initial approach that led to the `no running event loop` error.
-    # The reason for that error was trying to create `asyncio.run()` in a new thread
-    # which conflicts with the default policy.
-
-    # The most robust way is to make the Flask application itself asynchronous (ASGI)
-    # and then start the Telegram bot's async loop within Flask's async context.
-    # This means using `Quart` or `Flask-Async` with an ASGI server like `Uvicorn`.
-
-    # However, if we stick to `Flask` with `Gunicorn` (WSGI), then we must run the
-    # bot's event loop in a separate, dedicated thread, and ensure the `asyncio`
-    # policies are set correctly for that thread.
-
-    # Let's try to restart the threading approach with proper asyncio policy setting.
-
-    # Re-introducing threading for the bot's background tasks
-    # This is often where the 'no running event loop' comes from if not handled correctly.
-    # The key is to create a NEW event loop for the new thread.
-    
-    # The original structure:
-    # bot_thread = Thread(target=lambda: asyncio.run(application.run_polling()))
-    # bot_thread.start()
-    # app.run(...)
-
-    # This failed because `asyncio.run` tries to create/get a loop.
-    # Instead, we need to create a new loop explicitly for the thread.
-
-    def run_telegram_bot_in_thread(app_instance: Application):
-        # Create a new event loop for this new thread
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+    try:
+        value_arg = args[0]
+        unit_arg = args[1].lower()
+        quantity = int(args[2]) if len(args) == 3 else 1 # Default to 1 key if quantity not provided
         
-        # Now run the Telegram bot's webhook and job_queue setup
-        # in this new event loop.
-        loop.run_until_complete(setup_bot_initialization(app_instance))
+        valid_units = ['phút', 'giờ', 'ngày', 'tuần', 'tháng', 'vĩnh_viễn']
+        if unit_arg not in valid_units:
+            bot.reply_to(message, "Đơn vị không hợp lệ. Chỉ chấp nhận `phút`, `giờ`, `ngày`, `tuần`, `tháng` hoặc `vĩnh_viễn`.", parse_mode='Markdown')
+            return
         
-        # Start processing webhook updates for the Telegram bot in this loop.
-        # This will keep the loop running and process incoming updates.
-        # For webhooks, the application doesn't need to run_polling().
-        # It just needs its job_queue to be active and set_webhook to be called.
-        # The actual updates are processed by the Flask webhook handler.
-        
-        # The job_queue will continue to run in this loop.
-        loop.run_forever() # Keep the event loop running for job_queue
-
-    async def setup_bot_initialization(app_instance: Application):
-        if WEBHOOK_URL:
-            logger.info(f"Setting webhook to: {WEBHOOK_URL}")
-            await app_instance.bot.set_webhook(url=WEBHOOK_URL)
+        if unit_arg == 'vĩnh_viễn':
+            value = 1 # Value is not really used for perpetual, but kept for consistency
+            if not value_arg.isdigit() or int(value_arg) != 1:
+                bot.reply_to(message, "Đối với gói `vĩnh_viễn`, giá trị phải là `1`.", parse_mode='Markdown')
+                return
         else:
-            logger.warning("WEBHOOK_URL not set. Bot might not receive updates correctly.")
+            value = int(value_arg)
+            if value <= 0:
+                bot.reply_to(message, "Giá trị phải lớn hơn 0.", parse_mode='Markdown')
+                return
         
-        # Schedule the periodic task to fetch predictions
-        app_instance.job_queue.run_repeating(fetch_and_send_prediction_task, interval=5, first=1)
-        logger.info("Telegram bot tasks scheduled in its own event loop.")
+        if quantity <= 0:
+            bot.reply_to(message, "Số lượng phải lớn hơn 0.", parse_mode='Markdown')
+            return
 
+        generated_keys_list = []
+        for _ in range(quantity):
+            new_key = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8)) # 8 ký tự ngẫu nhiên
+            GENERATED_CODES[new_key] = {
+                "value": value,
+                "type": unit_arg,
+                "used_by": None,
+                "used_time": None
+            }
+            generated_keys_list.append(new_key)
+        
+        save_codes()
+        
+        response_text = f"✅ Đã tạo thành công {quantity} mã key gia hạn **{value_arg} {unit_arg}**:\n\n"
+        response_text += "\n".join([f"`{key}`" for key in generated_keys_list])
+        response_text += "\n\n_(Các mã này chưa được sử dụng)_"
+        
+        bot.reply_to(message, response_text, parse_mode='Markdown')
 
-    global application_instance
-    application_instance = ApplicationBuilder().token(TOKEN).build()
+    except ValueError:
+        bot.reply_to(message, "Giá trị hoặc số lượng không hợp lệ. Vui lòng nhập số nguyên.", parse_mode='Markdown')
+    except Exception as e:
+        bot.reply_to(message, f"Đã xảy ra lỗi khi tạo key: {e}", parse_mode='Markdown')
 
-    # Register handlers
-    application_instance.add_handler(CommandHandler("start", start))
-    application_instance.add_handler(CommandHandler("help", help_command))
-    application_instance.add_handler(CommandHandler("key", activate_key))
-    application_instance.add_handler(CommandHandler("chaymodelbasic", chay_model_basic))
-    application_instance.add_handler(CommandHandler("stop", stop_prediction))
-    application_instance.add_handler(CommandHandler("admin", admin_command))
-    application_instance.add_handler(CommandHandler("taokey", tao_key))
-    application_instance.add_handler(CommandHandler("check", check_stats))
-    application_instance.add_handler(CommandHandler("tbao", send_to_all))
-
-
-    # Start the Telegram bot's event loop and tasks in a separate thread
-    bot_thread = Thread(target=run_telegram_bot_in_thread, args=(application_instance,))
-    bot_thread.daemon = True # Allow the main program to exit even if this thread is running
-    bot_thread.start()
+@bot.message_handler(commands=['check'])
+def check_prediction_stats(message):
+    if not is_admin(message.chat.id):
+        bot.reply_to(message, "Bạn không có quyền sử dụng lệnh này.")
+        return
     
-    # For Gunicorn, `app` itself is the entry point, so we don't call `app.run()` here.
-    # Gunicorn will import `app` and serve it.
-    logger.info("Flask app initialized. Waiting for Gunicorn to start serving.")
+    total = prediction_stats['total']
+    correct = prediction_stats['correct']
+    
+    if total > 0:
+        win_rate = (correct / total) * 100
+        stats_text = (
+            "📊 **THỐNG KÊ DỰ ĐOÁN BOT** 📊\n\n"
+            f"✅ Số phiên dự đoán đúng: `{correct}`\n"
+            f"🔢 Tổng số phiên đã dự đoán: `{total}`\n"
+            f"📈 Tỷ lệ thắng: `{win_rate:.2f}%`"
+        )
+    else:
+        stats_text = "📊 **THỐNG KÊ DỰ ĐOÁN BOT** 📊\n\nChưa có đủ dữ liệu để thống kê dự đoán."
+    
+    bot.reply_to(message, stats_text, parse_mode='Markdown')
 
-# Dòng này cần nằm ngoài main() để Gunicorn có thể import `app`
-# Gunicorn sẽ gọi `app` như một WSGI callable.
-# Khi Gunicorn chạy file này, `if __name__ == "__main__"` sẽ không chạy.
-# Tuy nhiên, `application_instance` và `app` phải được cấu hình.
-# Để xử lý điều này một cách sạch sẽ, chúng ta có thể đặt logic khởi tạo vào
-# một hàm và gọi nó một cách thích hợp.
 
-# Let's use a setup function that Gunicorn can call implicitly or explicitly.
+@bot.message_handler(commands=['thongke'])
+def get_stats(message):
+    if not is_admin(message.chat.id):
+        bot.reply_to(message, "Bạn không có quyền sử dụng lệnh này.")
+        return
 
-# The current structure: `main()` initializes everything, and `app` is just a global.
-# When Gunicorn imports `bot.py`, it executes the top-level code.
-# So `application_instance = ApplicationBuilder().token(TOKEN).build()`
-# and all `add_handler` calls run.
-# The `bot_thread` is also started.
-# This should be the most robust way.
+    total_users = len(user_data)
+    active_users = 0
+    for user_id_str, user_info in user_data.items():
+        is_sub, _ = check_subscription(int(user_id_str))
+        if is_sub:
+            active_users += 1
 
-# This `if __name__ == "__main__":` block is for local testing.
-# When deployed with Gunicorn, Gunicorn imports the module and calls `app`.
-# So the code outside any function definitions will be executed once.
-# Let's ensure the `main()` function is what sets up the global `app` and `application_instance`.
+    total_codes = len(GENERATED_CODES)
+    used_codes = sum(1 for code_info in GENERATED_CODES.values() if code_info.get('used_by') is not None)
 
-# Let's use a simple pattern where Gunicorn imports `app` and we ensure `application_instance`
-# is set up by executing `main()` at the module level.
+    stats_text = (
+        "📊 **THỐNG KÊ BOT** 📊\n\n"
+        f"👥 Tổng số người dùng: `{total_users}`\n"
+        f"🟢 Người dùng đang hoạt động: `{active_users}`\n"
+        f"🔑 Tổng số mã key đã tạo: `{total_codes}`\n"
+        f"✅ Mã key đã sử dụng: `{used_codes}`"
+    )
+    bot.reply_to(message, stats_text, parse_mode='Markdown')
 
-main() # Call main() directly so it runs when the module is imported by Gunicorn.
 
+# --- Flask Routes cho Keep-Alive ---
+@app.route('/')
+def home():
+    return "Bot is alive and running!"
+
+@app.route('/health')
+def health_check():
+    return "OK", 200
+
+# --- Khởi tạo bot và các luồng khi Flask app khởi động ---
+@app.before_request
+def start_bot_threads():
+    global bot_initialized
+    with bot_init_lock:
+        if not bot_initialized:
+            print("Initializing bot and prediction threads...")
+            # Load initial data
+            load_user_data()
+            load_codes()
+            load_prediction_stats() # Tải thống kê dự đoán khi khởi động
+
+            # Start prediction loop in a separate thread
+            prediction_thread = Thread(target=prediction_loop, args=(prediction_stop_event,))
+            prediction_thread.daemon = True
+            prediction_thread.start()
+            print("Prediction loop thread started.")
+
+            # Start bot polling in a separate thread
+            polling_thread = Thread(target=bot.infinity_polling, kwargs={'none_stop': True})
+            polling_thread.daemon = True
+            polling_thread.start()
+            print("Telegram bot polling thread started.")
+            
+            bot_initialized = True
+
+# --- Điểm khởi chạy chính cho Gunicorn/Render ---
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    print(f"Starting Flask app locally on port {port}")
+    app.run(host='0.0.0.0', port=port, debug=True)

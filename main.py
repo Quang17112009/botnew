@@ -3,7 +3,7 @@ import requests
 import uuid
 import datetime
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, JobQueue # Import JobQueue
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 # --- Cấu hình Logging ---
 logging.basicConfig(
@@ -12,6 +12,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- Cấu hình Bot (Token và ID Admin được cài trực tiếp) ---
+# LƯU Ý: Việc nhúng trực tiếp token và ID vào code KHÔNG ĐƯỢC KHUYẾN KHÍCH
+# cho môi trường production vì lý do bảo mật. Nên sử dụng biến môi trường.
 BOT_TOKEN = "8137068939:AAG19xO92yXsz_d9vz_m2aJW2Wh8JZnvSPQ"
 ADMIN_ID = 6915752059 
 API_URL = "https://apiluck2.onrender.com/predict"
@@ -21,17 +23,25 @@ ADMIN_TELEGRAM_LINK = "t.me/heheviptool"
 prediction_active = False
 
 # --- Quản lý Key, Người dùng và Lịch sử dự đoán ---
-active_keys = {} 
-user_subscriptions = {} 
-registered_users = set() 
-prediction_history = [] 
+# Trong một ứng dụng thực tế, bạn nên sử dụng cơ sở dữ liệu (SQLite, PostgreSQL, etc.)
+# để lưu trữ thông tin key, người dùng và lịch sử dự đoán một cách bền vững.
+# Ví dụ đơn giản này sẽ lưu trữ trong bộ nhớ (sẽ mất khi bot khởi động lại).
+active_keys = {} # { "key_string": {"expiry_date": datetime_obj, "user_id": None} }
+user_subscriptions = {} # { "user_id": {"key": "key_string", "expiry_date": datetime_obj} }
+registered_users = set() # Tập hợp các user_id đã từng tương tác với bot
+
+# Lịch sử dự đoán để tính toán cho lệnh /check
+prediction_history = [] # Lưu trữ {"phien": "2020297", "ket_qua_api": "t" hoặc "x", "du_doan_bot": "Tài" hoặc "Xỉu"}
+
+# Biến để theo dõi phiên cuối cùng đã gửi thông báo
+last_known_session_id = None 
 
 # --- Hàm xử lý lệnh /start ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     user_name = update.effective_user.first_name
 
-    registered_users.add(user_id) 
+    registered_users.add(user_id) # Ghi nhận người dùng đã tương tác
 
     package_status = "Chưa kích hoạt"
     expiry_status = "Chưa kích hoạt"
@@ -42,7 +52,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             package_status = "Đã kích hoạt"
             expiry_status = sub_info["expiry_date"].strftime("%H:%M %d/%m/%Y")
         else:
+            # Key đã hết hạn
             del user_subscriptions[user_id] 
+            # Tìm key trong active_keys để đặt lại user_id = None nếu cần
             for key, info in active_keys.items():
                 if info.get("user_id") == user_id:
                     active_keys[key]["user_id"] = None
@@ -83,59 +95,73 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 # --- Hàm gửi dự đoán từ API ---
 async def send_prediction(context: ContextTypes.DEFAULT_TYPE) -> None:
-    global prediction_active
+    global prediction_active, last_known_session_id
     chat_id = context.job.chat_id
 
+    # Kiểm tra xem người dùng có gói kích hoạt không
     if chat_id not in user_subscriptions or user_subscriptions[chat_id]["expiry_date"] <= datetime.datetime.now():
         await context.bot.send_message(chat_id=chat_id, text="Gói của bạn đã hết hạn hoặc chưa kích hoạt. Vui lòng kích hoạt gói để tiếp tục nhận dự đoán.")
+        # Dừng job nếu gói hết hạn
         context.job.schedule_removal()
         if chat_id in user_subscriptions:
             del user_subscriptions[chat_id]
         return
 
     if not prediction_active:
-        return 
+        return # Dừng nếu dự đoán không còn hoạt động
 
     try:
         response = requests.get(API_URL)
-        response.raise_for_status() 
+        response.raise_for_status()  # Ném lỗi nếu có lỗi HTTP (4xx hoặc 5xx)
         data = response.json()
 
-        phien_moi = data.get("Phien_moi", "Không có")
-        matches_list = data.get("matches", [])
+        phien_moi = data.get("Phien_moi") # Lấy session ID mới nhất
         
-        ket_qua_api = ""
-        ket_qua_display = "N/A"
-        if "t" in matches_list:
-            ket_qua_display = "TÀI"
-            ket_qua_api = "t"
-        elif "x" in matches_list:
-            ket_qua_display = "XỈU"
-            ket_qua_api = "x"
-        
-        pattern = data.get("pattern", "Không có")
-        phien_du_doan = data.get("phien_du_doan", "Không có")
-        du_doan_ket_qua = data.get("du_doan", "Không có") 
+        # Chỉ gửi thông báo nếu có phiên mới hoặc đây là lần đầu tiên
+        if phien_moi and phien_moi != last_known_session_id:
+            last_known_session_id = phien_moi # Cập nhật session ID cuối cùng đã biết
 
-        if phien_moi and du_doan_ket_qua != "Không có" and ket_qua_api:
-            prediction_history.append({
-                "phien": phien_moi,
-                "ket_qua_api": ket_qua_api, 
-                "du_doan_bot": du_doan_ket_qua 
-            })
-            if len(prediction_history) > 100:
-                prediction_history.pop(0)
+            # Trích xuất thông tin từ API
+            matches_list = data.get("matches", [])
+            
+            # Chuyển đổi 't' thành 'TÀI', 'x' thành 'XỈU'
+            ket_qua_api = ""
+            ket_qua_display = "N/A"
+            if "t" in matches_list:
+                ket_qua_display = "TÀI"
+                ket_qua_api = "t"
+            elif "x" in matches_list:
+                ket_qua_display = "XỈU"
+                ket_qua_api = "x"
+            
+            pattern = data.get("pattern", "Không có")
+            phien_du_doan = data.get("phien_du_doan", "Không có")
+            du_doan_ket_qua = data.get("du_doan", "Không có") 
 
-        prediction_message = (
-            "🤖 ʟᴜᴄᴋʏᴡɪɴ\n"
-            f"🎯 ᴘʜɪᴇ̂ɴ {phien_moi}\n"
-            f"🎲 ᴋᴇ̂́ᴛ ǫᴜᴀ̉ : {ket_qua_display} {phien_moi}\n"
-            f"🧩 ᴘᴀᴛᴛᴇʀɴ : {pattern}\n"
-            f"🎮 ᴘʜɪᴇ̂ɴ {phien_du_doan} : {du_doan_ket_qua} (ᴍᴏᴅᴇʟ ʙᴀꜱɪᴄ)\n"
-            "————————-"
-        )
-        
-        await context.bot.send_message(chat_id=chat_id, text=prediction_message)
+            # Ghi lại lịch sử dự đoán cho lệnh /check
+            if du_doan_ket_qua != "Không có" and ket_qua_api:
+                prediction_history.append({
+                    "phien": phien_moi,
+                    "ket_qua_api": ket_qua_api, 
+                    "du_doan_bot": du_doan_ket_qua 
+                })
+                # Giữ lịch sử không quá lớn, ví dụ 100 phiên gần nhất
+                if len(prediction_history) > 100:
+                    prediction_history.pop(0)
+
+            # Định dạng lại thông báo
+            prediction_message = (
+                "🤖 ʟᴜᴄᴋʏᴡɪɴ\n"
+                f"🎯 ᴘʜɪᴇ̂ɴ {phien_moi}\n"
+                f"🎲 ᴋᴇ̂́ᴛ ǫᴜᴀ̉ : {ket_qua_display} {phien_moi}\n"
+                f"🧩 ᴘᴀᴛᴛᴇʀɴ : {pattern}\n"
+                f"🎮 ᴘʜɪᴇ̂ɴ {phien_du_doan} : {du_doan_ket_qua} (ᴍᴏᴅᴇʟ ʙᴀꜱɪᴄ)\n"
+                "————————-"
+            )
+            
+            await context.bot.send_message(chat_id=chat_id, text=prediction_message)
+        # else:
+        #     logger.info(f"Phien_moi {phien_moi} trùng với last_known_session_id. Không gửi thông báo.")
 
     except requests.exceptions.RequestException as e:
         logger.error(f"Lỗi khi gọi API: {e}")
@@ -145,7 +171,7 @@ async def send_prediction(context: ContextTypes.DEFAULT_TYPE) -> None:
 # --- Hàm xử lý lệnh /chaymodelbasic ---
 async def chay_model_basic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    global prediction_active
+    global prediction_active, last_known_session_id # Thêm last_known_session_id
 
     if user_id not in user_subscriptions or user_subscriptions[user_id]["expiry_date"] <= datetime.datetime.now():
         await update.message.reply_text("Bạn cần kích hoạt gói để chạy dự đoán. Dùng /key [mã] để kích hoạt.")
@@ -157,31 +183,23 @@ async def chay_model_basic(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     prediction_active = True
     chat_id = update.effective_chat.id
-    await update.message.reply_text("Bắt đầu chạy dự đoán (MODEL BASIC). Bot sẽ gửi kết quả sau mỗi 60 giây.")
+    await update.message.reply_text("Bắt đầu chạy dự đoán (MODEL BASIC). Bot sẽ tự động gửi khi có phiên mới.")
 
-    # Access the job_queue directly from the Application instance if context.job_queue is causing issues
-    # However, context.job_queue *should* be available here. Let's ensure the application's job_queue is the one used.
-    # The current line is: context.job_queue.run_repeating(...)
-    # If the problem persists, we might need to rethink how job_queue is accessed in Render's environment.
-    
-    # For now, let's keep the existing line as it's the standard way.
-    # The 'NoneType' error indicates that context.job_queue itself is None.
-    # This points to an issue with how the Application is initialized or how context is populated *in that specific Render environment*.
-    # Let's try importing JobQueue explicitly and making sure the application's job_queue is ready.
+    # Đặt lại last_known_session_id khi bắt đầu chạy mới
+    last_known_session_id = None
 
-    # This line is where the error occurred
-    # Make sure the application has a JobQueue instance
     if not hasattr(context, 'job_queue') or context.job_queue is None:
         logger.error("context.job_queue is None. This should not happen in a correctly set up Application.")
         await update.message.reply_text("Bot gặp lỗi nội bộ. Vui lòng thử lại sau hoặc liên hệ admin.")
         return
 
-    context.job_queue.run_repeating(send_prediction, interval=60, first=0, chat_id=chat_id, name="prediction_job")
+    # Vẫn polling mỗi 1 giây để phát hiện phiên mới nhanh nhất
+    context.job_queue.run_repeating(send_prediction, interval=1, first=0, chat_id=chat_id, name="prediction_job")
 
 
 # --- Hàm xử lý lệnh /stop ---
 async def stop_prediction(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    global prediction_active
+    global prediction_active, last_known_session_id # Thêm last_known_session_id
     if not prediction_active:
         await update.message.reply_text("Dự đoán chưa được chạy.")
         return
@@ -191,6 +209,7 @@ async def stop_prediction(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     for job in current_jobs:
         job.schedule_removal() 
     await update.message.reply_text("Đã dừng dự đoán.")
+    last_known_session_id = None # Đặt lại khi dừng
 
 # --- Hàm xử lý lệnh /key ---
 async def activate_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -198,25 +217,26 @@ async def activate_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("Vui lòng nhập mã kích hoạt. Ví dụ: /key ABC-123-XYZ")
         return
 
-    key_input = context.args[0].upper() 
+    key_input = context.args[0].upper() # Chuyển sang chữ hoa để nhất quán
     user_id = update.effective_user.id
 
     if key_input in active_keys:
         key_info = active_keys[key_input]
-        if key_info["user_id"] is None: 
+        if key_info["user_id"] is None: # Key chưa được sử dụng
             expiry_date = key_info["expiry_date"]
-            if expiry_date <= datetime.datetime.now(): 
+            if expiry_date <= datetime.datetime.now(): # Kiểm tra key còn hạn không
                 await update.message.reply_text("Mã kích hoạt này đã hết hạn. Vui lòng liên hệ admin.")
-                del active_keys[key_input] 
+                del active_keys[key_input] # Xóa key hết hạn
                 return
 
-            active_keys[key_input]["user_id"] = user_id 
+            active_keys[key_input]["user_id"] = user_id # Đánh dấu key đã dùng
             user_subscriptions[user_id] = {"key": key_input, "expiry_date": expiry_date}
 
             await update.message.reply_text(
                 f"🎉 Kích hoạt gói thành công!\n"
                 f"Gói của bạn có hiệu lực đến: **{expiry_date.strftime('%H:%M %d/%m/%Y')}**"
             )
+            # Cập nhật trạng thái người dùng (ví dụ: bằng cách gọi /start lại)
             await start(update, context) 
         elif key_info["user_id"] == user_id:
             await update.message.reply_text("Mã này đã được bạn sử dụng rồi.")
@@ -237,34 +257,35 @@ async def create_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     duration_str = context.args[0].lower()
     expiry_date = None
+    # Tạo key ngẫu nhiên đơn giản, có thể thêm tiền tố để dễ phân biệt
     key = "LW-" + str(uuid.uuid4()).split('-')[0].upper() 
 
     now = datetime.datetime.now()
 
     if duration_str == "vinhvien":
-        expiry_date = now + datetime.timedelta(days=365 * 100) 
+        expiry_date = now + datetime.timedelta(days=365 * 100) # Coi như vĩnh viễn (100 năm)
     else:
         try:
             value = int(duration_str[:-1])
             unit = duration_str[-1]
-            if unit == 's': 
+            if unit == 's': # giây
                 expiry_date = now + datetime.timedelta(seconds=value)
-            elif unit == 'm': 
+            elif unit == 'm': # phút
                 expiry_date = now + datetime.timedelta(minutes=value)
-            elif unit == 'h': 
+            elif unit == 'h': # giờ
                 expiry_date = now + datetime.timedelta(hours=value)
-            elif unit == 'd': 
+            elif unit == 'd': # ngày
                 expiry_date = now + datetime.timedelta(days=value)
-            elif unit == 'w': 
+            elif unit == 'w': # tuần
                 expiry_date = now + datetime.timedelta(weeks=value)
-            elif unit == 'M': 
+            elif unit == 'M': # tháng (ước tính 30 ngày)
                 expiry_date = now + datetime.timedelta(days=value * 30)
-            elif unit == 'y': 
+            elif unit == 'y': # năm (ước tính 365 ngày)
                 expiry_date = now + datetime.timedelta(days=value * 365)
             else:
                 await update.message.reply_text("Định dạng thời hạn không hợp lệ. Ví dụ: `1s, 5m, 2h, 1d, 3w, 1M, 1y, vinhvien`")
                 return
-        except (ValueError, IndexError): 
+        except (ValueError, IndexError): # Bắt cả IndexError nếu chuỗi rỗng
             await update.message.reply_text("Định dạng thời hạn không hợp lệ. Ví dụ: `1s, 5m, 2h, 1d, 3w, 1M, 1y, vinhvien`")
             return
     
@@ -360,15 +381,6 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 def main() -> None:
     """Khởi chạy bot."""
     application = Application.builder().token(BOT_TOKEN).build()
-
-    # Make sure JobQueue is initialized and available
-    # The JobQueue is automatically added to the Application object when it's built
-    # and passed via context in handlers.
-    # If it's None, it usually means the Application itself isn't fully set up or the context is somehow corrupted.
-    
-    # Let's add an explicit check to make sure job_queue is ready *before* adding handlers that use it,
-    # though this is mostly for debugging.
-    # The core issue might be specific to Render's free tier execution model.
 
     # Đăng ký các trình xử lý lệnh chung
     application.add_handler(CommandHandler("start", start))

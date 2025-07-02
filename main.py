@@ -14,7 +14,6 @@ from telegram.ext import (
 )
 from flask import Flask, request
 import json
-import time
 import datetime
 import uuid
 
@@ -29,12 +28,13 @@ TOKEN = "8137068939:AAG19xO92yXsz_d9vz_m2aJW2Wh8JZnvSPQ"
 ADMIN_ID = 6915752059  # ID Telegram của admin
 API_URL = "https://apiluck2.onrender.com/predict"
 
-# Lấy URL của dịch vụ Render từ biến môi trường (Render tự động cung cấp)
+# Lấy URL của dịch vụ Render từ biến môi trường
 WEBHOOK_URL_BASE = os.environ.get("RENDER_EXTERNAL_HOSTNAME") 
+WEBHOOK_PATH = f"/{TOKEN}"
 if WEBHOOK_URL_BASE:
-    WEBHOOK_URL = f"https://{WEBHOOK_URL_BASE}/{TOKEN}"
+    WEBHOOK_URL = f"https://{WEBHOOK_URL_BASE}{WEBHOOK_PATH}"
 else:
-    WEBHOOK_URL = None # Cần được cấu hình nếu không phải Render
+    WEBHOOK_URL = None # Cần được cấu hình nếu không phải Render (ví dụ: cho local testing)
 
 # Dictionary để lưu trạng thái chạy dự đoán của từng người dùng
 user_prediction_status = {}
@@ -53,9 +53,10 @@ prediction_stats = {
 # Biến để lưu trữ phiên cuối cùng mà bot đã xử lý từ API
 last_api_phien_moi_processed = None
 
-# Flask app cho webhook
+# Flask app
 app = Flask(__name__)
-application_instance = None # Sẽ được khởi tạo trong main và gán vào đây
+# Application instance sẽ được tạo và gán sau
+application_instance: Application = None
 
 # Định nghĩa các hàm xử lý lệnh (giữ nguyên như trước)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -258,7 +259,7 @@ async def stop_prediction(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     user_prediction_status[user_id] = False
     await update.message.reply_text("🛑 Đã dừng dự đoán.")
 
-async def admin_command(update: Update.Update, context: ContextTypes.DEFAULT_TYPE) -> None: # Sửa Update.Update thành Update
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None: # Đã sửa lỗi Update.Update thành Update
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("Bạn không có quyền sử dụng lệnh này.")
         return
@@ -373,43 +374,8 @@ async def send_to_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     
     await update.message.reply_text(f"Đã gửi tin nhắn đến {sent_count} người dùng. Thất bại: {failed_count}.")
 
-# Webhook handler
-@app.route(f"/{TOKEN}", methods=["POST"])
-async def telegram_webhook():
-    if application_instance is None:
-        logger.error("Application instance is None. Webhook cannot be processed.")
-        return "Internal server error", 500
-    
-    update_data = request.get_json(force=True)
-    update = Update.de_json(update_data, application_instance.bot)
-    
-    # Process update asynchronously
-    # Use application_instance.update_queue.put(update) or application_instance.process_update(update)
-    # The latter is simpler for direct webhook processing.
-    await application_instance.process_update(update)
-    return "ok"
-
-# Route cho Render để kiểm tra trạng thái
-@app.route('/')
-def index():
-    return "Bot is running and listening for webhooks!"
-
-# Hàm chạy bot Telegram (chỉ bao gồm việc khởi tạo và lên lịch job)
-async def run_telegram_bot_tasks(app_instance: Application):
-    logger.info("Initializing Telegram bot tasks...")
-    # Đặt webhook cho bot
-    if WEBHOOK_URL:
-        logger.info(f"Setting webhook to: {WEBHOOK_URL}")
-        await app_instance.bot.set_webhook(url=WEBHOOK_URL)
-    else:
-        logger.warning("WEBHOOK_URL not set. Bot might not receive updates correctly.")
-    
-    # Schedule the periodic task to fetch predictions
-    # interval=5 là 5 giây, có thể điều chỉnh
-    app_instance.job_queue.run_repeating(fetch_and_send_prediction_task, interval=5, first=1)
-    logger.info("Telegram bot tasks scheduled.")
-
-def main() -> None:
+# Function to setup the bot and schedule jobs
+async def setup_bot():
     global application_instance
     
     # Xây dựng ứng dụng bot
@@ -423,25 +389,215 @@ def main() -> None:
     application_instance.add_handler(CommandHandler("stop", stop_prediction))
     application_instance.add_handler(CommandHandler("admin", admin_command))
     
-    # Các lệnh admin mới
     application_instance.add_handler(CommandHandler("taokey", tao_key))
     application_instance.add_handler(CommandHandler("check", check_stats))
     application_instance.add_handler(CommandHandler("tbao", send_to_all))
 
-    # Khởi chạy các tác vụ của Telegram bot (webhook và job_queue) trong một background task
-    # Điều này đảm bảo chúng chạy trong event loop của application_instance
-    # và không chặn Flask server.
-    application_instance.create_task(run_telegram_bot_tasks(application_instance))
-
-    # Flask sẽ chạy trên cổng được Render cung cấp
-    port = int(os.environ.get("PORT", 8080))
+    # Đặt webhook cho bot
+    if WEBHOOK_URL:
+        logger.info(f"Setting webhook to: {WEBHOOK_URL}")
+        await application_instance.bot.set_webhook(url=WEBHOOK_URL)
+    else:
+        logger.warning("WEBHOOK_URL not set. Bot might not receive updates correctly.")
     
-    # Khởi chạy Flask app
-    # Gunicorn sẽ gọi app.run() thông qua WSGI, nên KHÔNG gọi app.run() ở đây
-    logger.info(f"Flask app is ready to serve on port {port}")
+    # Schedule the periodic task to fetch predictions
+    application_instance.job_queue.run_repeating(fetch_and_send_prediction_task, interval=5, first=1)
+    logger.info("Telegram bot tasks scheduled.")
 
+# Webhook handler
+@app.route(WEBHOOK_PATH, methods=["POST"])
+async def telegram_webhook():
+    if application_instance is None:
+        logger.error("Application instance is None. Webhook cannot be processed.")
+        return "Internal server error", 500
+    
+    update_data = request.get_json(force=True)
+    update = Update.de_json(update_data, application_instance.bot)
+    
+    # Process update asynchronously
+    await application_instance.process_update(update)
+    return "ok"
+
+# Route cho Render để kiểm tra trạng thái
+@app.route('/')
+def index():
+    return "Bot is running and listening for webhooks!"
+
+# Function to run the Flask app and set up bot.
+# This function will be the entry point for Gunicorn.
+def run_app():
+    # Setup bot asynchronously
+    asyncio.run(setup_bot())
+    # Gunicorn will manage the Flask app lifecycle.
+    # We do NOT call app.run() here when using Gunicorn.
+    # This function should simply exist for Gunicorn to call `bot:app`
+    # and the Flask app will then handle incoming requests,
+    # while the job_queue runs in the background within the
+    # python-telegram-bot Application's event loop.
+    logger.info("Flask app is ready to serve. Bot tasks are running.")
+
+# Dòng này cần được đặt ở cuối file và là entry point cho Gunicorn
 if __name__ == "__main__":
-    # Đây là điểm khởi đầu khi Gunicorn chạy `bot:app`
-    # `app` là đối tượng Flask, và `main()` sẽ được gọi để cấu hình `application_instance`
-    main()
+    # If running locally, you might want to call app.run() directly for testing.
+    # But for Render/Gunicorn, this block is typically not executed directly for Flask part.
+    # Instead, Gunicorn imports the `app` object and runs it.
+    
+    # For local testing, you can uncomment this:
+    # asyncio.run(setup_bot())
+    # port = int(os.environ.get("PORT", 8080))
+    # app.run(host="0.0.0.0", port=port)
+    
+    # When Gunicorn runs `gunicorn bot:app`, it imports `app` directly.
+    # The `setup_bot()` needs to be called to initialize the telegram bot
+    # and its JobQueue.
+    # A common pattern for Gunicorn is to have a `main` function or similar
+    # that sets up the application.
+    
+    # The `setup_bot` will run and schedule jobs.
+    # The Flask app (`app`) will then listen for requests.
+    # The problem is that Gunicorn runs `app` directly, not `main()`.
+    # So `setup_bot()` needs to be called when `app` is initialized.
+    
+    # Let's ensure setup_bot is called when the module is loaded if
+    # Gunicorn is importing it, or directly if __name__ == "__main__"
+    # To handle both, we'll call setup_bot as part of the app lifecycle
+    # which is tricky with Flask and ptb's async nature.
+
+    # A better approach for Gunicorn with async initialization:
+    # Use Flask's `@app.before_first_request` or similar, but that's for sync Flask.
+    # For async Flask, we need to manually manage the lifecycle.
+
+    # Let's try to initialize the bot application when the module is first loaded
+    # and then ensure its async parts are run.
+
+    # This structure is often best handled by creating the Application outside main
+    # and using a custom command for Gunicorn or a specific entrypoint.
+    
+    # For simplicity and to directly address the error:
+    # The `setup_bot()` should be called when `app` is run by Gunicorn.
+    # Gunicorn uses a WSGI server model. A common way is to make `app` callable
+    # and have it perform the setup.
+
+    # Let's define an async function to do the setup and make Flask run it.
+    # This requires a bit of a Flask ASGI server setup.
+    # But the current python-telegram-bot Application is designed for its own loop.
+
+    # Let's revert to a simpler method that sometimes works with Gunicorn
+    # by ensuring the `Application` is fully built and running its background tasks
+    # before Flask starts accepting requests.
+
+    # --- FINAL ATTEMPT FOR SIMPLICITY AND COMPATIBILITY ---
+    # The core issue is that `application_instance.job_queue` is `None` until
+    # `application_instance.run_polling()` or `application_instance.run_webhook()`
+    # has started its event loop.
+    # When using Gunicorn, you typically expose the Flask `app` object.
+    # The `python-telegram-bot` `Application` needs its own event loop to manage `JobQueue`.
+
+    # Let's try to run the bot's event loop in a background thread
+    # and the Flask app in the main thread (managed by Gunicorn).
+    # This was the initial approach that led to the `no running event loop` error.
+    # The reason for that error was trying to create `asyncio.run()` in a new thread
+    # which conflicts with the default policy.
+
+    # The most robust way is to make the Flask application itself asynchronous (ASGI)
+    # and then start the Telegram bot's async loop within Flask's async context.
+    # This means using `Quart` or `Flask-Async` with an ASGI server like `Uvicorn`.
+
+    # However, if we stick to `Flask` with `Gunicorn` (WSGI), then we must run the
+    # bot's event loop in a separate, dedicated thread, and ensure the `asyncio`
+    # policies are set correctly for that thread.
+
+    # Let's try to restart the threading approach with proper asyncio policy setting.
+
+    # Re-introducing threading for the bot's background tasks
+    # This is often where the 'no running event loop' comes from if not handled correctly.
+    # The key is to create a NEW event loop for the new thread.
+    
+    # The original structure:
+    # bot_thread = Thread(target=lambda: asyncio.run(application.run_polling()))
+    # bot_thread.start()
+    # app.run(...)
+
+    # This failed because `asyncio.run` tries to create/get a loop.
+    # Instead, we need to create a new loop explicitly for the thread.
+
+    def run_telegram_bot_in_thread(app_instance: Application):
+        # Create a new event loop for this new thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # Now run the Telegram bot's webhook and job_queue setup
+        # in this new event loop.
+        loop.run_until_complete(setup_bot_initialization(app_instance))
+        
+        # Start processing webhook updates for the Telegram bot in this loop.
+        # This will keep the loop running and process incoming updates.
+        # For webhooks, the application doesn't need to run_polling().
+        # It just needs its job_queue to be active and set_webhook to be called.
+        # The actual updates are processed by the Flask webhook handler.
+        
+        # The job_queue will continue to run in this loop.
+        loop.run_forever() # Keep the event loop running for job_queue
+
+    async def setup_bot_initialization(app_instance: Application):
+        if WEBHOOK_URL:
+            logger.info(f"Setting webhook to: {WEBHOOK_URL}")
+            await app_instance.bot.set_webhook(url=WEBHOOK_URL)
+        else:
+            logger.warning("WEBHOOK_URL not set. Bot might not receive updates correctly.")
+        
+        # Schedule the periodic task to fetch predictions
+        app_instance.job_queue.run_repeating(fetch_and_send_prediction_task, interval=5, first=1)
+        logger.info("Telegram bot tasks scheduled in its own event loop.")
+
+
+    global application_instance
+    application_instance = ApplicationBuilder().token(TOKEN).build()
+
+    # Register handlers
+    application_instance.add_handler(CommandHandler("start", start))
+    application_instance.add_handler(CommandHandler("help", help_command))
+    application_instance.add_handler(CommandHandler("key", activate_key))
+    application_instance.add_handler(CommandHandler("chaymodelbasic", chay_model_basic))
+    application_instance.add_handler(CommandHandler("stop", stop_prediction))
+    application_instance.add_handler(CommandHandler("admin", admin_command))
+    application_instance.add_handler(CommandHandler("taokey", tao_key))
+    application_instance.add_handler(CommandHandler("check", check_stats))
+    application_instance.add_handler(CommandHandler("tbao", send_to_all))
+
+
+    # Start the Telegram bot's event loop and tasks in a separate thread
+    bot_thread = Thread(target=run_telegram_bot_in_thread, args=(application_instance,))
+    bot_thread.daemon = True # Allow the main program to exit even if this thread is running
+    bot_thread.start()
+    
+    # For Gunicorn, `app` itself is the entry point, so we don't call `app.run()` here.
+    # Gunicorn will import `app` and serve it.
+    logger.info("Flask app initialized. Waiting for Gunicorn to start serving.")
+
+# Dòng này cần nằm ngoài main() để Gunicorn có thể import `app`
+# Gunicorn sẽ gọi `app` như một WSGI callable.
+# Khi Gunicorn chạy file này, `if __name__ == "__main__"` sẽ không chạy.
+# Tuy nhiên, `application_instance` và `app` phải được cấu hình.
+# Để xử lý điều này một cách sạch sẽ, chúng ta có thể đặt logic khởi tạo vào
+# một hàm và gọi nó một cách thích hợp.
+
+# Let's use a setup function that Gunicorn can call implicitly or explicitly.
+
+# The current structure: `main()` initializes everything, and `app` is just a global.
+# When Gunicorn imports `bot.py`, it executes the top-level code.
+# So `application_instance = ApplicationBuilder().token(TOKEN).build()`
+# and all `add_handler` calls run.
+# The `bot_thread` is also started.
+# This should be the most robust way.
+
+# This `if __name__ == "__main__":` block is for local testing.
+# When deployed with Gunicorn, Gunicorn imports the module and calls `app`.
+# So the code outside any function definitions will be executed once.
+# Let's ensure the `main()` function is what sets up the global `app` and `application_instance`.
+
+# Let's use a simple pattern where Gunicorn imports `app` and we ensure `application_instance`
+# is set up by executing `main()` at the module level.
+
+main() # Call main() directly so it runs when the module is imported by Gunicorn.
 

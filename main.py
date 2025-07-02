@@ -1,6 +1,7 @@
 import logging
 import requests
 import asyncio
+import os # Thêm thư viện os để lấy biến môi trường
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -9,13 +10,14 @@ from telegram.ext import (
     MessageHandler,
     filters,
     ApplicationBuilder,
+    CallbackContext, # Thêm CallbackContext
 )
 from flask import Flask, request
-from threading import Thread
+from threading import Thread # Có thể loại bỏ nếu không cần keep_alive riêng biệt
 import json
 import time
 import datetime
-import uuid # Để tạo key ngẫu nhiên
+import uuid
 
 # Cấu hình logging
 logging.basicConfig(
@@ -28,10 +30,16 @@ TOKEN = "8137068939:AAG19xO92yXsz_d9vz_m2aJW2Wh8JZnvSPQ"
 ADMIN_ID = 6915752059  # ID Telegram của admin
 API_URL = "https://apiluck2.onrender.com/predict"
 
+# Lấy URL của dịch vụ Render từ biến môi trường (Render tự động cung cấp)
+# Đảm bảo bạn đặt tên dịch vụ trên Render là 'your-bot-name'
+WEBHOOK_URL = os.environ.get("RENDER_EXTERNAL_HOSTNAME") 
+if WEBHOOK_URL:
+    WEBHOOK_URL = f"https://{WEBHOOK_URL}/{TOKEN}" # Hoặc đường dẫn tùy chỉnh nếu bạn muốn
+
 # Dictionary để lưu trạng thái chạy dự đoán của từng người dùng
 user_prediction_status = {}
-# Dictionary để lưu ID tin nhắn cuối cùng đã gửi để cập nhật
-last_prediction_message_id = {}
+# Dictionary để lưu ID tin nhắn cuối cùng đã gửi để cập nhật (có thể không cần nếu không cập nhật tin nhắn)
+# last_prediction_message_id = {}
 # Dictionary để lưu trữ thông tin key và hạn sử dụng
 # Cần thay thế bằng cơ sở dữ liệu thực tế trong môi trường production
 active_keys = {} # key: { 'expiry_date': datetime.datetime, 'used_by': user_id }
@@ -45,15 +53,15 @@ prediction_stats = {
     "last_predicted_result": None # Kết quả dự đoán của phiên cuối cùng
 }
 
+# Biến để lưu trữ phiên cuối cùng mà bot đã xử lý từ API
+# Để tránh gửi lại dự đoán cho cùng một phiên
+last_api_phien_moi_processed = None
+
 # Flask app cho webhook và keep_alive
 app = Flask(__name__)
+application = None # Sẽ được khởi tạo trong main và gán vào đây
 
-# Hàm giữ cho bot luôn hoạt động trên Render
-@app.route('/')
-def keep_alive():
-    return "Bot is running!"
-
-# Định nghĩa các hàm xử lý lệnh
+# Định nghĩa các hàm xử lý lệnh (giữ nguyên như trước)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     user_id = user.id
@@ -142,7 +150,7 @@ async def activate_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     else:
         await update.message.reply_text("Mã kích hoạt không hợp lệ. Vui lòng kiểm tra lại hoặc liên hệ Admin.")
 
-async def send_prediction_message(chat_id: int, prediction_data: dict, context: Application) -> None:
+async def send_prediction_message(chat_id: int, prediction_data: dict, bot_obj) -> None: # Thay ContextTypes.DEFAULT_TYPE bằng bot_obj
     try:
         phien_moi = prediction_data.get("Phien_moi", "N/A")
         matches = prediction_data.get("matches", [])
@@ -173,67 +181,65 @@ async def send_prediction_message(chat_id: int, prediction_data: dict, context: 
             prediction_stats["last_actual_result"] = ket_qua
             prediction_stats["last_predicted_result"] = du_doan_ket_qua
         
-        # Gửi tin nhắn và lưu message_id
-        message = await context.bot.send_message(chat_id=chat_id, text=message_text)
-        last_prediction_message_id[chat_id] = message.message_id
+        # Gửi tin nhắn
+        await bot_obj.send_message(chat_id=chat_id, text=message_text)
 
     except Exception as e:
         logger.error(f"Lỗi khi gửi tin nhắn dự đoán cho chat_id {chat_id}: {e}")
 
-async def fetch_and_send_prediction(context: Application) -> None:
-    last_processed_phien_moi = {} # Lưu phiên mới nhất đã xử lý cho từng chat_id
+# Hàm fetch và gửi dự đoán được sửa đổi để chạy định kỳ
+async def fetch_and_send_prediction_task(context: CallbackContext) -> None:
+    global last_api_phien_moi_processed
     
-    while True:
-        await asyncio.sleep(5)  # Đợi 5 giây trước khi fetch lại
-        
-        # Lấy danh sách người dùng cần gửi dự đoán
-        users_to_predict = []
-        for user_id, status in list(user_prediction_status.items()):
-            if status: # Nếu người dùng đã bật dự đoán
-                # Kiểm tra gói kích hoạt
-                if user_id in user_active_packages:
-                    key = user_active_packages[user_id]
-                    if key in active_keys:
-                        key_data = active_keys[key]
-                        if key_data['expiry_date'] is None or key_data['expiry_date'] > datetime.datetime.now():
-                            users_to_predict.append(user_id)
-                        else:
-                            # Gói hết hạn, tắt dự đoán và thông báo cho người dùng
-                            user_prediction_status[user_id] = False
-                            await context.bot.send_message(chat_id=user_id, text="⚠️ Gói của bạn đã hết hạn. Vui lòng kích hoạt lại để tiếp tục nhận dự đoán.")
-                            del user_active_packages[user_id]
-                            del active_keys[key]
-                    else: # Key không tồn tại, có thể đã bị xóa admin
-                        user_prediction_status[user_id] = False
-                        await context.bot.send_message(chat_id=user_id, text="⚠️ Gói của bạn không còn hiệu lực. Vui lòng liên hệ Admin.")
-                        del user_active_packages[user_id]
-                else: # Người dùng chưa có gói kích hoạt
-                    user_prediction_status[user_id] = False
-                    await context.bot.send_message(chat_id=user_id, text="⚠️ Vui lòng kích hoạt gói để sử dụng chức năng dự đoán. Dùng /key [mã].")
+    try:
+        response = requests.get(API_URL)
+        response.raise_for_status()
+        data = response.json()
+        current_phien_moi = data.get("Phien_moi")
 
-
-        if not users_to_predict: # Nếu không có ai cần gửi dự đoán, ngủ lâu hơn
-            await asyncio.sleep(10)
-            continue
+        if current_phien_moi and current_phien_moi != last_api_phien_moi_processed:
+            logger.info(f"Phát hiện phiên mới: {current_phien_moi}. Đang gửi dự đoán...")
             
-        try:
-            response = requests.get(API_URL)
-            response.raise_for_status()
-            data = response.json()
-            current_phien_moi = data.get("Phien_moi")
+            # Lấy danh sách người dùng cần gửi dự đoán
+            users_to_predict_in_this_cycle = []
+            for user_id, status in list(user_prediction_status.items()):
+                if status: # Nếu người dùng đã bật dự đoán
+                    # Kiểm tra gói kích hoạt
+                    if user_id in user_active_packages:
+                        key = user_active_packages[user_id]
+                        if key in active_keys:
+                            key_data = active_keys[key]
+                            if key_data['expiry_date'] is None or key_data['expiry_date'] > datetime.datetime.now():
+                                users_to_predict_in_this_cycle.append(user_id)
+                            else:
+                                # Gói hết hạn, tắt dự đoán và thông báo cho người dùng
+                                user_prediction_status[user_id] = False
+                                await context.bot.send_message(chat_id=user_id, text="⚠️ Gói của bạn đã hết hạn. Vui lòng kích hoạt lại để tiếp tục nhận dự đoán.")
+                                del user_active_packages[user_id]
+                                del active_keys[key]
+                        else: # Key không tồn tại, có thể đã bị xóa admin
+                            user_prediction_status[user_id] = False
+                            await context.bot.send_message(chat_id=user_id, text="⚠️ Gói của bạn không còn hiệu lực. Vui lòng liên hệ Admin.")
+                            del user_active_packages[user_id]
+                    else: # Người dùng chưa có gói kích hoạt
+                        user_prediction_status[user_id] = False
+                        await context.bot.send_message(chat_id=user_id, text="⚠️ Vui lòng kích hoạt gói để sử dụng chức năng dự đoán. Dùng /key [mã].")
+            
+            for chat_id in users_to_predict_in_this_cycle:
+                await send_prediction_message(chat_id, data, context.bot) # Sử dụng context.bot thay vì context.application
+                await asyncio.sleep(0.1) # Thêm độ trễ nhỏ để tránh flood limit
+            
+            last_api_phien_moi_processed = current_phien_moi # Cập nhật phiên cuối cùng đã xử lý
+        else:
+            logger.info(f"Phiên API hiện tại ({current_phien_moi}) chưa thay đổi.")
+            
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Lỗi khi gọi API: {e}")
+    except json.JSONDecodeError as e:
+        logger.error(f"Lỗi phân tích JSON từ API: {e}")
+    except Exception as e:
+        logger.error(f"Lỗi không xác định trong fetch_and_send_prediction_task: {e}")
 
-            for chat_id in users_to_predict:
-                # Chỉ gửi nếu phiên mới khác với phiên cuối cùng đã xử lý cho chat_id này
-                if chat_id not in last_processed_phien_moi or last_processed_phien_moi[chat_id] != current_phien_moi:
-                    await send_prediction_message(chat_id, data, context)
-                    last_processed_phien_moi[chat_id] = current_phien_moi
-                
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Lỗi khi gọi API: {e}")
-        except json.JSONDecodeError as e:
-            logger.error(f"Lỗi phân tích JSON từ API: {e}")
-        except Exception as e:
-            logger.error(f"Lỗi không xác định trong fetch_and_send_prediction: {e}")
 
 async def chay_model_basic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
@@ -257,16 +263,11 @@ async def chay_model_basic(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     user_prediction_status[user_id] = True
     await update.message.reply_text("⚡️ Đang chạy dự đoán (LUCK) từ Model Basic... Vui lòng đợi kết quả.")
     
-    # Lần đầu chạy, gửi dự đoán ngay lập tức
-    try:
-        response = requests.get(API_URL)
-        response.raise_for_status()
-        data = response.json()
-        await send_prediction_message(user_id, data, context.application)
-        
-    except Exception as e:
-        logger.error(f"Lỗi ban đầu khi chạy dự đoán cho người dùng {user_id}: {e}")
-        await update.message.reply_text("Có lỗi xảy ra khi lấy dự đoán. Vui lòng thử lại sau.")
+    # Không cần gọi API ngay lập tức ở đây, vì fetch_and_send_prediction_task sẽ chạy định kỳ
+    # và gửi dự đoán mới nhất khi có sẵn.
+    # Tuy nhiên, nếu bạn muốn gửi dự đoán ngay lập tức khi người dùng bật, bạn có thể gọi:
+    # await fetch_and_send_prediction_task(context)
+    # Nhưng hãy cẩn thận với tần suất gọi API.
 
 async def stop_prediction(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
@@ -395,8 +396,21 @@ async def send_to_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     
     await update.message.reply_text(f"Đã gửi tin nhắn đến {sent_count} người dùng. Thất bại: {failed_count}.")
 
+# Webhook handler
+@app.route(f"/{TOKEN}", methods=["POST"])
+async def telegram_webhook():
+    update = Update.de_json(request.get_json(force=True), application.bot)
+    await application.process_update(update)
+    return "ok"
+
+# Route cho Render để kiểm tra trạng thái
+@app.route('/')
+def index():
+    return "Bot is running and listening for webhooks!"
 
 def main() -> None:
+    global application # Gán biến global
+    
     # Xây dựng ứng dụng bot
     application = ApplicationBuilder().token(TOKEN).build()
 
@@ -413,15 +427,35 @@ def main() -> None:
     application.add_handler(CommandHandler("check", check_stats))
     application.add_handler(CommandHandler("tbao", send_to_all))
 
-    # Khởi tạo một task chạy nền để fetch và gửi dự đoán
-    application.create_task(fetch_and_send_prediction(application))
+    # Đặt webhook cho bot
+    # Cần phải chạy này một lần khi triển khai hoặc khi thay đổi WEBHOOK_URL
+    # Có thể đặt nó vào một hàm riêng và gọi thủ công hoặc trong logic khởi tạo
+    async def set_my_webhook():
+        if WEBHOOK_URL:
+            logger.info(f"Setting webhook to: {WEBHOOK_URL}")
+            await application.bot.set_webhook(url=WEBHOOK_URL)
+        else:
+            logger.warning("WEBHOOK_URL not set. Bot might not receive updates correctly.")
+    
+    # Chạy hàm set_my_webhook
+    asyncio.run(set_my_webhook())
 
-    # Khởi chạy bot trong một luồng riêng
-    bot_thread = Thread(target=lambda: asyncio.run(application.run_polling()))
-    bot_thread.start()
+    # Schedule the periodic task to fetch predictions
+    # interval=5 là 5 giây, có thể điều chỉnh
+    application.job_queue.run_repeating(fetch_and_send_prediction_task, interval=5, first=1) 
+    
+    # Đây là nơi Flask sẽ chạy và nhận các webhook updates từ Telegram
+    # Flask app sẽ chạy trên luồng chính, Telegram updates sẽ được xử lý bởi application.process_update
+    # và các tác vụ định kỳ của job_queue sẽ chạy trong event loop của application.
+    
+    # Flask sẽ chạy trên cổng được Render cung cấp
+    port = int(os.environ.get("PORT", 8080))
     
     # Khởi chạy Flask app
-    app.run(host="0.0.0.0", port=8080) 
+    # Gunicorn sẽ gọi app.run() thông qua WSGI
+    # Đừng gọi app.run() trực tiếp khi dùng Gunicorn, Gunicorn sẽ tự lo
+    logger.info(f"Flask app starting on port {port}")
+    # Nếu chạy local để test: app.run(host="0.0.0.0", port=port)
 
 if __name__ == "__main__":
     main()

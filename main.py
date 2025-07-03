@@ -564,8 +564,6 @@ def escape_markdown_v2(text):
         text = str(text)
     
     # Ký tự cần thoát: _ * [ ] ( ) ~ ` > # + - = | { } . !
-    # Ký tự `.` không cần thoát khi nó không đứng ngay sau một số.
-    # Trong trường hợp này, vì dùng cho tên file, key, text chung, thoát tất cả là an toàn nhất.
     escape_chars = r'_*[]()~`>#+-=|{}.!' 
     return "".join('\\' + char if char in escape_chars else char for char in text)
 
@@ -593,9 +591,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             del users_with_active_subscriptions[user_id]
             save_keys() # Lưu lại thay đổi
     
+    # Sửa lỗi: Bỏ escape cho '!' nếu nó là dấu cảm thán thông thường
     response_message = (
         f"🌟 CHÀO MỪNG {escape_markdown_v2(user_name)} 🌟\n"
-        f"🎉 Chào mừng đến với HeHe Bot 🎉\n"
+        f"🎉 Chào mừng đến với HeHe Bot 🎉\n" # Bỏ '\' trước '!'
         f"📦 Gói hiện tại: {escape_markdown_v2(subscription_status)}\n"
         f"⏰ Hết hạn: {escape_markdown_v2(expiry_info)}\n"
         f"💡 Dùng /help để xem các lệnh"
@@ -663,8 +662,8 @@ async def key_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         # active_keys[provided_key]['is_active'] = False # Tùy chọn: vô hiệu hóa key sau khi dùng lần đầu nếu là key 1 lần
         users_with_active_subscriptions[user_id] = provided_key
         save_keys()
-        expiry_str = "Vĩnh viễn" if key_details['expiry_time'] == 'forever' else key_details['expiry_time'].strftime('%H:%M %d/%m/%Y')
-        await update.message.reply_text(f"Chúc mừng\! Gói của bạn đã được kích hoạt thành công đến: {escape_markdown_v2(expiry_str)}\\.", parse_mode=ParseMode.MARKDOWN_V2)
+        # Dòng này đã được sửa lỗi "invalid escape sequence \!"
+        await update.message.reply_text(f"Chúc mừng! Gói của bạn đã được kích hoạt thành công đến: {escape_markdown_v2(expiry_str)}\\.", parse_mode=ParseMode.MARKDOWN_V2)
     
 
 async def chaymodelbasic_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -686,6 +685,8 @@ async def chaymodelbasic_command(update: Update, context: ContextTypes.DEFAULT_T
 
     async def send_predictions_loop():
         nonlocal update # Để truy cập update từ hàm cha
+        global bot_running # Đặt khai báo global lên đầu hàm này để tránh SyntaxError
+
         while bot_running:
             # Kiểm tra lại trạng thái đăng ký của người dùng trong vòng lặp
             if not is_user_subscribed(user_id):
@@ -693,7 +694,6 @@ async def chaymodelbasic_command(update: Update, context: ContextTypes.DEFAULT_T
                 await context.bot.send_message(chat_id=update.effective_chat.id, 
                                                text="Gói của bạn đã hết hạn hoặc bị vô hiệu hóa\\. Bot dự đoán đã dừng\\.", 
                                                parse_mode=ParseMode.MARKDOWN_V2)
-                global bot_running # Phải khai báo lại global để thay đổi biến toàn cục
                 bot_running = False # Dừng vòng lặp
                 break # Thoát khỏi vòng lặp
                 
